@@ -1,4 +1,4 @@
-MAA 2.1
+MAA 2.2
 
 Run the same GitHub loader to get the current version:
 
@@ -6,7 +6,7 @@ Run the same GitHub loader to get the current version:
 loadstring(game:HttpGet("https://raw.githubusercontent.com/Cybersize/MAA/main/loader.lua"))()
 ```
 
-You can also run the local `MAA.lua` file. The panel should show **MAA 2.1**. MattLib 1.2.1 is embedded with its MIT notice; no separate UI download is needed. Right Ctrl hides/shows the window. The designs are selectable in Diagnostics.
+You can also run the local `MAA.lua` file. The panel should show **MAA 2.2**. MattLib 1.2.1 is embedded with its MIT notice; no separate UI download is needed. Right Ctrl hides/shows the window. The designs are selectable in Diagnostics.
 
 One recording file
 
@@ -47,10 +47,20 @@ The supplied place snapshot had zero wave/time values and lacked its main wave-s
 
 Repeat and diagnostics
 
-Save a recording, use **Learn in-game Replay button** at an end screen, then click the game's Replay button once. Enable Repeat and the learned replay vote. Completed playback votes once at match end and waits for a reset. A new client/server session still requires running/loading MAA again; teleport reinjection is not installed.
+On the **Macro** tab, enable **Auto Replay at match end**. No learning step or loaded recording is required. It uses the built-in `set_game_finished_vote("replay")` request. The optional learned-argument override remains available if the game's request format differs.
+
+- **Replay delay (seconds)** defaults to `2`. It can be changed from 0 to 60 seconds.
+- Enabling Auto Replay also enables macro Repeat. Turn Repeat off if you want only replay voting and standalone wave rules. A macro starts repeating after you have started playback; simply loading a file does not launch it.
+- At a normal finish or early loss, pending future-wave playback is cancelled. A repeating macro waits for the next actual match reset instead of hanging on unreachable waves.
+- A sent vote is not repeated while waiting for the server or other players. Explicit rejections retry with spacing, up to three attempts by default. Errors and unresolved RPCs stop repeated voting; status is displayed in the panel.
+- **Auto-start replayed match** defaults on. After a reset, it sends a zero-argument start vote only if the game has not already started, its endpoint is ready, and the map is not a lobby. Disable it for manual starts.
+- **Stop everything** pauses replay and start voting too. Replay waits while a recording is active or a manual argument-learning session is pending.
+- **Save wave rules in this macro JSON** stores the replay toggle, repeat preference, delay, and start setting with upgrade/sell settings. No additional JSON is created.
+
+These controls operate within the current client/server session. A new Roblox client still requires running/loading MAA again; teleport reinjection is not installed. The built-in request has not been verified against your live server; use diagnostics and the optional override if the vote is rejected.
 
 Playback reports remain in memory. **Save clock / unit diagnostics JSON** explicitly exports `<name>.diagnostics.json`, including the report, current clock samples, recent recording states, and ownership-field names. Use this only when troubleshooting; it is the only optional extra JSON. No diagnostics are uploaded.
 
 The namecall recorder requires `hookmetamethod`, `getnamecallmethod`, `readfile`, `writefile`, and `loadstring` for the embedded UI. Separately cached native-method calls can bypass namecall capture. The hook only queues plain data and forwards the original request; processing runs outside it. Movement and camera input are outside this action macro.
 
-The bundle compiles with official Luau 0.745 and passed 41 core scenarios plus six actual-MattLib integration checks in local engine doubles. It has not been verified in the live game or your executor. Start with a short recording and low-risk wave settings before using a full run.
+The bundle compiles with official Luau 0.745 and passed 59 core scenarios plus seven actual-MattLib integration checks in local engine doubles. It has not been verified in the live game or your executor. Start with a short recording and low-risk wave settings before using a full run.

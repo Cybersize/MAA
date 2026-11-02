@@ -2,7 +2,7 @@
 
 Roblox action macro with the bundled MattLib UI, JSON recordings, and wave-aware playback.
 
-Version 2.1 saves one JSON per macro and adds optional wave-based auto-upgrade and auto-sell for all your placed units.
+Version 2.2 adds automatic Replay voting without a learning step, optional start voting after reset, and early-loss recovery. It keeps one JSON per macro and the owned-unit wave upgrade/sell rules.
 
 ## Run the latest version
 
@@ -30,7 +30,11 @@ Use **Save wave rules in this macro JSON** to store the settings with the record
 
 Normal save/play creates only `<name>.json`. Drafts, staged copies, backups, and playback logs are no longer written automatically. Recovery-safe cleanup removes old helper files only when the main recording validates. Manual diagnostics export remains optional.
 
-See [the usage guide](docs/USAGE.md) for timing, repeat playback, and compatibility limits. See [validation](docs/VALIDATION.md) for 41 core scenarios and six MattLib integration checks. These checks used local engine doubles; live-game/executor compatibility remains unverified.
+## Auto Replay
+
+On **Macro**, enable **Auto Replay at match end**. No learned button or loaded macro is required. The default delay is two seconds. Enabling it also turns on macro Repeat; uncheck Repeat for vote-only operation. It handles early losses, waits for a real reset, and can send a start vote if the replayed match needs one. Already-sent votes are not spammed; explicit rejections have bounded retries. **Stop everything** pauses replay too. Save its settings with the other rules in the same JSON.
+
+See [the usage guide](docs/USAGE.md) for timing, repeat playback, and compatibility limits. See [validation](docs/VALIDATION.md) for 59 core scenarios and seven MattLib integration checks. These checks used local engine doubles; live-game/executor compatibility remains unverified.
 
 ## Updating
 

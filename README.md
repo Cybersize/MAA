@@ -2,6 +2,8 @@
 
 Roblox action macro with the bundled MattLib UI, JSON recordings, and wave-aware playback.
 
+Version 2.1 saves one JSON per macro and adds optional wave-based auto-upgrade and auto-sell for all your placed units.
+
 ## Run the latest version
 
 ```lua
@@ -20,7 +22,15 @@ The stable loader fetches the current `main.lua` with a timestamp query on every
 
 Use a new v2 recording for wave/time synchronization. Legacy files retain their offset timeline. Local recordings remain under the executor's `AA_Macros/` folder and are not uploaded.
 
-See [the usage guide](docs/USAGE.md) for timing sources, repeat playback, diagnostics, and compatibility limits. See [validation](docs/VALIDATION.md) for the 24 core scenarios and five MattLib integration checks. These checks used local engine doubles; live-game/executor compatibility remains unverified.
+## Wave rules
+
+Open **Wave rules**. Auto-upgrade supports a start wave, optional end wave, and target level (`0 = Max`). Auto-sell applies from the chosen wave onward, including units placed later. Both toggles default off and affect only units confirmed to belong to you. Rules run independently of macro playback. **Stop everything** pauses both playback and automation.
+
+Use **Save wave rules in this macro JSON** to store the settings with the recording. Saving rules alone creates a settings-only profile in that same file. During an active upgrade window, wave rules manage upgrades instead of duplicating recorded upgrade calls. Selling takes priority once its wave is reached.
+
+Normal save/play creates only `<name>.json`. Drafts, staged copies, backups, and playback logs are no longer written automatically. Recovery-safe cleanup removes old helper files only when the main recording validates. Manual diagnostics export remains optional.
+
+See [the usage guide](docs/USAGE.md) for timing, repeat playback, and compatibility limits. See [validation](docs/VALIDATION.md) for 41 core scenarios and six MattLib integration checks. These checks used local engine doubles; live-game/executor compatibility remains unverified.
 
 ## Updating
 

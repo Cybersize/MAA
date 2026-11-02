@@ -1,65 +1,56 @@
-AA Macro 2.0
+MAA 2.1
 
-Use **AA_Macro_v2.lua**. It embeds [Cybersize/MattLib](https://github.com/Cybersize/MattLib) 1.2.1, pinned to commit `bb9187fa8be705a5b7225904b0dd737c9f612035`. The MIT license is included in the script. No separate UI loader, download, or HTTP request is needed. Vector is the default design; Diagnostics offers all four MattLib designs.
-
-Put the file in your executor's workspace and run:
+Run the same GitHub loader to get the current version:
 
 ```lua
-loadstring(readfile("AA_Macro_v2.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Cybersize/MAA/main/loader.lua"))()
 ```
 
-You can also execute the file's contents directly. The panel should read **AA Macro 2.0**. Running it again disables the earlier macro controller and replaces its UI. Right Ctrl hides/shows the window; MattLib provides dragging, resizing, and restore controls.
+You can also run the local `MAA.lua` file. The panel should show **MAA 2.1**. MattLib 1.2.1 is embedded with its MIT notice; no separate UI download is needed. Right Ctrl hides/shows the window. The designs are selectable in Diagnostics.
 
-Make a new recording with v2. Old v1 JSON files do not contain wave synchronization data; they can load, but use their original elapsed-offset schedule.
+One recording file
 
-1. Choose a macro name. **Record this match now** works when the match is already underway. **Arm recording for next match** waits for the next observed match start.
-2. Place, upgrade, change priority, and sell normally. Active abilities and supported start/skip votes are also captured. Spawn preserves the inventory UUID, full CFrame position/rotation, and argument count. The screenshots' priority value `flying` is kept verbatim. Unit references retain their identity when sold models move into ReplicatedStorage.
-3. Click **Stop / save recording**. Requests are processed outside the recording hook and confirmed from replicated state when available. Placements stay pending until their units are associated. Requests without a readable confirmation field are explicitly marked `request only` in JSON. Unconfirmed attempts remain marked and are skipped during playback.
-4. Keep the same account, map, and unit inventory. Load the JSON, then click **Play / sync current match**. It can join an already-running match. **Play next match** waits for a reset/start transition. **Vote to start match** sends the zero-argument start vote shown in the screenshots.
-5. **Stop playback** cancels future actions and retries. An already-sent request can still finish.
+Normal saving now writes only `AA_Macros/<name>.json` inside the executor workspace. It contains the actions, wave/time data, unit identities, replay vote, and wave-rule settings. No automatic draft, staged, backup, or last-playback JSON is created. The previous file is held in memory during write verification so a recoverable write failure can restore it. Unfinished recordings and playback diagnostics stay in memory until explicitly saved/exported.
 
-The **Timing** tab defaults to **Adaptive**, **Catch up**, and **Auto** timer interpretation.
+After a successful save, old helper files for that recording are removed when `delfile` is available. **Remove old helper JSONs** cleans other profiles too. Cleanup first validates the main recording; if it is missing or corrupt, recovery files are retained. Main recordings are never deleted by cleanup. Manual diagnostics exports are retained.
 
-- **Adaptive:** each action stores its wave and `_wave_time` reading, plus an observed wave phase when available. Playback uses the game's current wave/time. Auto detects increasing/decreasing movement and handles plausible server timestamps separately. A paused replicated timer pauses actions; early execution can wait for map/endpoints readiness.
-- **Catch up:** overdue steps run in sequence with a minimum gap. Existing matching placements and completed upgrades are skipped. A unit already sold in the overdue timeline is not bought again. Explicitly rejected unit actions retry within the readiness timeout. Ambiguous or unconfirmed placement results stop playback to prevent duplicates.
-- **Stop if late:** stops when an action misses its permitted timing window.
-- **Wave only:** synchronizes by wave and deliberately ignores within-wave time. This is a less precise fallback.
-- **Offsets:** replays elapsed offsets from playback start; legacy v1 recordings use this mode.
-- **Timing adjustment:** positive seconds delay actions; negative seconds advance them within the same wave.
+If `makefolder` is unavailable, the same files use the prefix `AA_Macro_` in the executor's workspace root. Local recordings are not uploaded to GitHub.
 
-The place snapshot contained `_wave_num` and `_wave_time`, both at zero; the main wave-service implementation was missing. Auto observes the live timer rather than assuming its meaning. If the timer stays zero or mid-wave time cannot be established, Adaptive waits for an observed wave boundary. It cannot reconstruct an unexposed clock. Manual increasing, remaining, start-timestamp, deadline-timestamp, and observed-boundary modes are available if diagnostics establishes the right interpretation.
+Recording and playback
 
-Catch-up applies recorded unit state using current resources; it cannot reproduce earlier combat or guarantee the same result. Server execution timing also depends on frame scheduling, replication, latency, funds, and cooldowns. Cobalt's log timestamps are not used as the game's clock.
+1. Give the macro a name, then use **Record this match now** or **Arm recording for next match**.
+2. Place, upgrade, change priority, sell, and use supported abilities/votes normally. Spawn preserves the UUID and all CFrame components. Sold models retain their macro identity after moving to ReplicatedStorage.
+3. Use **Stop / save recording**. Placement confirmation waits for its live unit; unavailable confirmation fields are marked `request only` in JSON. Unconfirmed attempts remain marked and are skipped during playback.
+4. Load the recording on the same account/map with the same unit inventory. Use **Play / sync current match** or **Play next match**. The defaults are **Adaptive / Catch up / Auto**.
+5. **Stop playback** and **Stop everything** pause wave rules as well. A request already sent to the server can still finish. Starting recording/playback resumes configured rules; standalone rules also have explicit Pause/Resume buttons.
 
-For automatic repeat, save a recording, click **Learn in-game Replay button** at an end screen, then click the game's Replay button once. Enable **Repeat after match resets** and **Send learned replay vote**. After completed playback, the script sends the learned vote once at the end state and waits for the next match. Other players' votes and game rules may delay a reset. A new Roblox client/server session still requires running/loading the script again; teleport reinjection is not installed.
+Wave auto-upgrade and auto-sell
 
-Files are stored in `AA_Macros/` inside the executor's workspace. Without `makefolder`, files use the prefix `AA_Macro_` in its workspace root.
+Open **Wave rules**. Both toggles are off by default. They apply to all placed units whose replicated ownership matches your player; other players' or unknown-owner models are skipped. Rules work during an active match with or without macro playback.
 
-- `<name>.json`: completed recording, including wave/time samples, arguments, unit tokens, and confirmation states.
-- `<name>.draft.json`: incomplete recovery snapshot; the normal loader rejects unfinished drafts.
-- `<name>.backup.json` and `<name>.staged.json`: save recovery/verification files.
-- `<name>.last-playback.json`: timing samples, attempts, rejection reasons, skips, and result.
-- `<name>.diagnostics.json`: clock samples, recent action states, unit ownership-field names, and playback details.
+- **Enable auto upgrade:** begin at **Upgrade from wave**. **Upgrade through wave** sets an inclusive end (`0` means no end). **Target upgrade level** sets the desired level (`0` means Max).
+- Upgrades are spread across your units with one automatic request in flight at a time. Funds/readiness rejections back off and retry. A reported maximum stops retries for that level. Accepted upgrades must produce a level change; an unconfirmed result pauses upgrading that unit to prevent duplicates.
+- **Enable auto sell:** sell from **Sell from wave (inclusive)** onward. Late enabling after that wave also works. Newly placed owned units are sold while the rule remains enabled. Selling takes priority over upgrading.
+- During an active upgrade window, the rule manages upgrades in place of recorded upgrade actions. Earlier recorded upgrades still play before the rule's start wave. Once the sell wave is reached, future unit actions/placements in the macro are skipped so playback does not keep using or buying sold units.
+- **Save wave rules in this macro JSON** writes the settings into the same recording file. Without a recording, it creates a settings-only profile. Load applies its saved rules; enabled rules can begin immediately when their wave is already reached. Settings-only profiles run through the wave toggles, not the Play button.
+- **Pause wave rules** pauses automation. **Resume wave rules** resumes it. **Stop everything** also stops the macro. RPC timeouts pause automation while an unresolved request remains outstanding.
 
-If spawning still fails silently, wait for the pending action to resolve, then use **Diagnostics → Save clock / unit diagnostics JSON**. Send that file and the last-playback file if the failure occurred during playback. These files remain local; the script does not upload them.
+Example: upgrade from wave 3 to level 4, then sell from wave 15 onward. Set start `3`, target `4`, sell wave `15`, enable both toggles, then save. Keep stop wave `0` unless you want a specific upgrade end wave.
 
-Executor requirements: `hookmetamethod`, `getnamecallmethod`, `readfile`, `writefile`, and `loadstring` for the embedded UI bundle. The hook observes supported `:InvokeServer()` / `:FireServer()` calls; separately cached native-method calls may bypass it. It only queues plain data and tail-forwards the original call. It performs no Instance serialization, network-result wrapping, or yielding, and preserves the original method/arguments. Unknown ownership layouts or ambiguous identical units can still require diagnostics. Movement and camera input are outside this action macro.
+Timing
 
-Optional settings before execution:
+Adaptive stores each action's wave, replicated `_wave_time`, and an observed phase when available. Auto detects increasing/decreasing timers and plausible server timestamps. A paused replicated timer pauses actions. Early execution waits for map/endpoints readiness. Late execution can catch up in order and skip matching existing placements or completed upgrades.
 
-```lua
-getgenv().AA_MacroOptions = {
-    ShowUI = true,
-    TimingMode = "Adaptive",
-    LatePolicy = "Catch up",
-    TimerSource = "Auto",
-    ReadyTimeout = 45,
-    RetryInterval = 0.5,
-    ConfirmTimeout = 8,
-    CallTimeout = 8,
-    MinActionGap = 0.12,
-    MaxLateness = 0.25,
-}
-```
+If a usable mid-wave timer is unavailable, Adaptive waits for an observed wave boundary. **Wave only** intentionally ignores within-wave time. **Offsets** uses elapsed time since playback starts; legacy v1 recordings use this mode because they have no wave samples. **Stop if late** rejects overdue actions. Positive timing adjustment delays within-wave actions; negative adjustment advances them.
 
-The script compiles with official Luau 0.745 and passed 24 deterministic core scenarios plus five actual-MattLib integration checks in engine doubles. It has not been verified in the live game, your executor, or a real rendered Roblox UI. Start with a short place → upgrade → priority → sell recording.
+The supplied place snapshot had zero wave/time values and lacked its main wave-service implementation. The live timer's meaning must therefore be detected or selected from diagnostics. Late catch-up cannot reproduce earlier combat, and server timing still depends on frames, replication, latency, funds, and cooldowns. Cobalt's logging timestamps are not used as the game clock.
+
+Repeat and diagnostics
+
+Save a recording, use **Learn in-game Replay button** at an end screen, then click the game's Replay button once. Enable Repeat and the learned replay vote. Completed playback votes once at match end and waits for a reset. A new client/server session still requires running/loading MAA again; teleport reinjection is not installed.
+
+Playback reports remain in memory. **Save clock / unit diagnostics JSON** explicitly exports `<name>.diagnostics.json`, including the report, current clock samples, recent recording states, and ownership-field names. Use this only when troubleshooting; it is the only optional extra JSON. No diagnostics are uploaded.
+
+The namecall recorder requires `hookmetamethod`, `getnamecallmethod`, `readfile`, `writefile`, and `loadstring` for the embedded UI. Separately cached native-method calls can bypass namecall capture. The hook only queues plain data and forwards the original request; processing runs outside it. Movement and camera input are outside this action macro.
+
+The bundle compiles with official Luau 0.745 and passed 41 core scenarios plus six actual-MattLib integration checks in local engine doubles. It has not been verified in the live game or your executor. Start with a short recording and low-risk wave settings before using a full run.

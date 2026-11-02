@@ -3899,7 +3899,7 @@ end
 return __require("init")
 
 ]====]
--- AA Macro v2.0 -- MattLib UI, passive capture and wave-aware scheduling.
+-- MAA v2.1 -- one recording JSON, wave auto-upgrade and auto-sell.
 -- MattLib 1.2.1 is embedded, pinned and MIT licensed. No runtime downloads.
 -- Records request timestamps, not guaranteed server execution timestamps.
 local ENV = getgenv and getgenv() or _G
@@ -3935,6 +3935,31 @@ check(finite(Options.MaxLateness or 0.25) and (Options.MaxLateness or 0.25) > 0,
     "MaxLateness must be a finite positive number")
 check(finite(Options.CallTimeout or 8) and (Options.CallTimeout or 8) > 0,
     "CallTimeout must be a finite positive number")
+local function normalizeWaveRules(rules)
+    rules=rules or {}
+    check(type(rules)=="table","Wave rules must be a table")
+    local function part(value,label)
+        value=value or {}; check(type(value)=="table",label .. " must be a table"); return value
+    end
+    local u,s=part(rules.upgrade,"Upgrade rule"),part(rules.sell,"Sell rule")
+    local function enabled(value)
+        check(value==nil or type(value)=="boolean","Rule enabled must be true or false")
+        return value==true
+    end
+    local function integer(value,default,label)
+        if value==nil then value=default end
+        check(finite(value) and value>=0 and value<=100000 and value%1==0,label .. " must be a nonnegative integer")
+        return value
+    end
+    local result={upgrade={enabled=enabled(u.enabled),startWave=integer(u.startWave,1,"Upgrade start wave"),
+        stopWave=integer(u.stopWave,0,"Upgrade stop wave"),targetLevel=integer(u.targetLevel,0,"Target upgrade")},
+        sell={enabled=enabled(s.enabled),wave=integer(s.wave,20,"Sell wave")}}
+    check(result.upgrade.stopWave==0 or result.upgrade.stopWave>=result.upgrade.startWave,
+        "Upgrade stop wave must be zero or at least the start wave")
+    return result
+end
+
+
 local function unitsFolder() return workspace:FindFirstChild("_UNITS") end
 local function endpoints()
     local e = RS:FindFirstChild("endpoints")
@@ -4391,7 +4416,8 @@ local function validate(doc)
     check(finite(doc.placeId) and finite(doc.userId) and type(doc.mapKey) == "string", "Invalid macro metadata")
     check(doc.anchor == "manual" or doc.anchor == "match", "Invalid clock anchor")
     check(finite(doc.duration) and doc.duration >= 0, "Invalid duration")
-    check(type(doc.actions) == "table" and #doc.actions > 0 and #doc.actions <= 20000, "Macro needs 1-20000 actions")
+    check(type(doc.actions)=="table" and #doc.actions<=20000 and (#doc.actions>0 or doc.profileOnly==true),"Macro needs recorded actions or a wave-rule profile")
+    if doc.autoRules then normalizeWaveRules(doc.autoRules) end
     check(type(doc.units) == "table", "Missing unit definitions")
     if doc.clockKind then check(doc.clockKind=="elapsed" or doc.clockKind=="remaining","Invalid clock kind") end
     local budget, lastTime = {n = 0}, -1
@@ -4438,6 +4464,54 @@ local function validate(doc)
     return doc
 end
 
+local legacyHelperSuffixes={".draft.json",".backup.json",".staged.json",".last-playback.json"}
+function API:CleanupHelpers(name)
+    name=name or self.name
+    local ok,doc=pcall(function() return validate(Http:JSONDecode(readfile(filePath(name)))) end)
+    if not ok then return 0 end -- Retain recovery copies if the main file is missing or invalid.
+    if type(delfile)~="function" then return 0 end
+    local removed=0
+    for _,suffix in ipairs(legacyHelperSuffixes) do
+        local path=filePath(name,suffix)
+        local exists=pcall(readfile,path)
+        if exists and pcall(delfile,path) then removed=removed+1 end
+    end
+    return removed
+end
+function API:CleanupOldHelpers()
+    local count=0
+    for _,name in ipairs(self:ListMacros()) do count=count+self:CleanupHelpers(name) end
+    notify("Removed " .. count .. " old helper files; main recordings were preserved")
+    return count
+end
+function API:Save(name)
+    name=name or self.name
+    check(self.mode~="recording" and self.mode~="record_armed","Stop recording before saving")
+    check(self.document~=nil,"There is no recording to save")
+    self.document.autoRules=normalizeWaveRules(self.autoRules)
+    self.document.appVersion="2.1.0"
+    local doc=validate(self.document)
+    local path=filePath(name)
+    local text=Http:JSONEncode(doc)
+    -- One file on disk. Keep the previous contents only in memory during write
+    -- verification, so a recoverable write error can restore the existing file.
+    local existed,previous=pcall(readfile,path)
+    local ok,err=pcall(function()
+        writefile(path,text)
+        check(readfile(path)==text,"Saved JSON verification failed")
+    end)
+    if not ok then
+        if existed then pcall(writefile,path,previous) end
+        error(err,0)
+    end
+    self.name=name
+    self:CleanupHelpers(name)
+    local counts=self:Counts()
+    notify("Saved " .. path .. " (" .. counts.successful .. " actions + wave rules)")
+    return path
+end
+
+
 function API:Counts()
     local counts = {successful = 0, pending = 0, failed = 0, attempted = 0}
     for _, entry in ipairs(self.document and self.document.actions or {}) do
@@ -4452,35 +4526,12 @@ function API:Counts()
     end
     return counts
 end
-function API:Save(name)
-    name = name or self.name
-    check(self.mode ~= "recording" and self.mode ~= "record_armed", "Stop recording before saving")
-    local doc = validate(self.document)
-    local path = filePath(name)
-    local text = Http:JSONEncode(doc)
-    -- Stage and verify first; retain the previous file before overwriting it.
-    writefile(filePath(name, ".staged.json"), text)
-    check(readfile(filePath(name, ".staged.json")) == text, "Staged JSON verification failed")
-    local exists, old = pcall(readfile, path)
-    if exists then writefile(filePath(name, ".backup.json"), old) end
-    local ok, err = pcall(function()
-        writefile(path, text)
-        check(readfile(path) == text, "Saved JSON verification failed")
-    end)
-    if not ok then
-        if exists then pcall(writefile, path, old) end
-        error(err, 0)
-    end
-    self.name = name
-    local counts = self:Counts()
-    notify("Saved " .. counts.successful .. " successful actions (" .. counts.attempted .. " attempts) to " .. path)
-    return path
-end
 function API:Load(name)
     check(self.mode == "idle", "Stop the active operation before loading")
     name = name or self.name
     local doc = validate(Http:JSONDecode(readfile(filePath(name))))
     self.document, self.name = doc, name
+    self:SetWaveRules(doc.autoRules or {})
     notify("Loaded " .. #doc.actions .. " actions: " .. name)
     return doc
 end
@@ -4488,11 +4539,11 @@ local function newContext(doc, recording)
     return {doc = doc, recording = recording, bound = {}, byModel = {}, jobs = {}, nextToken = 0,
         start = os.clock(), index = 1, inflight = 0, calls = {}, audit = {version = 2, name = API.name, actions = {}}, cancelled = false,
         factCache=Bridge and Bridge.facts or {}, confirmations={},targetLevels={},pruned={},busy=false,
-        timingMode=doc.version==1 and "Offsets" or API.timingMode}
+        timingMode=doc.version==1 and "Offsets" or API.timingMode,autoSold={}}
 end
 local function writeAudit(ctx, reason)
     ctx.audit.reason, ctx.audit.finishedUTC = reason, os.date("!%Y-%m-%dT%H:%M:%SZ")
-    pcall(function() writefile(filePath(API.name, ".last-playback.json"), Http:JSONEncode(ctx.audit)) end)
+    -- Playback diagnostics stay in memory until explicitly exported.
 end
 local function abort(message)
     local ctx = API.context
@@ -4503,10 +4554,7 @@ local function abort(message)
         elseif not ctx.finalized then
             ctx.doc.complete, ctx.doc.recordingError = false, tostring(message)
             ctx.doc.duration = os.clock()-ctx.start
-            local name = API.name
-            task.defer(function()
-                pcall(function() writefile(filePath(name, ".draft.json"), Http:JSONEncode(ctx.doc)) end)
-            end)
+            -- Unfinished recording stays in memory; no automatic helper JSON.
         end
     end
     API.generation = API.generation + 1
@@ -4521,7 +4569,9 @@ local function beginRecording(anchor)
     local doc = {format = "AA-Macro", version = 2, complete = false, placeId = game.PlaceId,
         userId = Player.UserId, mapKey = mapKey(), anchor = anchor,
         createdUTC = os.date("!%Y-%m-%dT%H:%M:%SZ"), duration = 0, units = {}, actions = {},startSync=clockStamp()}
+    doc.autoRules=normalizeWaveRules(API.autoRules)
     API.document, API.context = doc, newContext(doc, true)
+    API:PauseWaveRules(false)
     API.mode = "recording"
     notify("Recording " .. API.name .. " (" .. anchor .. " clock)")
 end
@@ -4554,7 +4604,7 @@ function API:StopRecording()
         if not pending then break end
         check(self.alive and self.context == ctx and not ctx.cancelled, "Finalization cancelled")
         if os.clock() >= deadline then
-            abort("Could not finalize: a request or placement is unresolved. Draft preserved; check the executor console")
+            abort("Could not finalize: a request or placement is unresolved. Unfinished recording remains in memory; no extra JSON was written")
             error("Unresolved placement/request; no complete macro was written", 0)
         end
         task.wait()
@@ -4566,6 +4616,7 @@ function API:StopRecording()
     return path
 end
 function API:Stop()
+    self:PauseWaveRules(true)
     self.learnReplay = false
     if self.mode == "recording" or self.mode == "record_armed" then return self:StopRecording() end
     abort("Stopped")
@@ -4618,6 +4669,7 @@ local function preflight(doc)
 end
 local function beginPlayback()
     local doc=validate(API.document)
+    check(#doc.actions>0,"This JSON contains wave rules only; enable them in Wave rules instead of Play")
     check(doc.placeId==game.PlaceId and doc.userId==Player.UserId,"Place or account differs from the recording")
     local config=workspace:FindFirstChild("_MAP_CONFIG")
     local loaded=config and config:FindFirstChild("MapLoaded")
@@ -4633,6 +4685,7 @@ local function beginPlayback()
     API.context = newContext(API.document, false)
     API.context.audit.startedUTC = os.date("!%Y-%m-%dT%H:%M:%SZ")
     API.mode = "playing"
+    API:PauseWaveRules(false)
     notify("Playing " .. API.name)
 end
 function API:Play(name, trigger)
@@ -4665,6 +4718,7 @@ function API:LearnReplay()
     notify("Learning: when the match ends, click the game's Replay button once")
 end
 function API:Shutdown()
+    if self.autoRuntime then self:PauseWaveRules(true) end
     self.alive = false
     if self.context then self.context.cancelled = true end
     for _, connection in ipairs(self.connections) do connection:Disconnect() end
@@ -4898,9 +4952,14 @@ local function performEntry(ctx,entry,late)
     local row = {seq=entry.seq,remote=entry.remote,scheduled=entry.t,sync=entry.sync,attempts={},late=late == math.huge and "past wave" or late}
     ctx.activeAudit=row
     local token = entryUnit(entry)
+    if token and ctx.autoSold[token] then auditFinish(ctx,entry,row,"skipped","unit was auto-sold"); return end
     if token and ctx.pruned[token] then auditFinish(ctx,entry,row,"skipped","unit was already sold in the overdue part of the recording"); return end
     local deadline = os.clock()+(Options.ReadyTimeout or 45)
     while active(ctx) do
+        local managed=API:_WaveRuleOwns(entry)
+        if managed then
+            auditFinish(ctx,entry,row,"skipped",managed); return
+        end
         local model = token and matchExisting(ctx,token)
         if entry.remote == "spawn_unit" and model then
             auditFinish(ctx,entry,row,"already present","matched existing owned unit"); return
@@ -4990,7 +5049,7 @@ local function playTick(ctx,now)
     if ctx.requestAt and not ctx.requestDone then
         check(now-ctx.requestAt <= (Options.CallTimeout or 8),"Server request timed out; playback stopped")
     end
-    if ctx.busy or now < (ctx.nextSend or 0) then return end
+    if ctx.busy or (API.autoRuntime and API.autoRuntime.call) or now < (ctx.nextSend or 0) then return end
     local entry = ctx.doc.actions[ctx.index]
     if not entry then
         if ctx.timingMode == "Offsets" and now-ctx.start < ctx.doc.duration then return end
@@ -5024,8 +5083,173 @@ local function playTick(ctx,now)
 end
 
 
+API.autoRules=normalizeWaveRules(Options.AutoRules)
+API.autoRuntime={paused=false,generation=0,cursor=0,nextAt=0,perUnit={},status="Wave rules are off"}
+
+local function sellRuleDue()
+    local s=Clock.sample
+    return API.autoRules.sell.enabled and s and s.started and not s.finished and finite(s.wave)
+        and s.wave>=API.autoRules.sell.wave
+end
+local function upgradeRuleDue()
+    local s,u=Clock.sample,API.autoRules.upgrade
+    return u.enabled and s and s.started and not s.finished and finite(s.wave) and s.wave>=u.startWave
+        and (u.stopWave==0 or s.wave<=u.stopWave) and not sellRuleDue()
+end
+function API:_WaveRuleOwns(entry)
+    local r=self.autoRuntime
+    if r.paused then return nil end
+    if sellRuleDue() and (entry.spawnUnit or entryUnit(entry)) then return "auto-sell wave has been reached" end
+    if entry.remote=="upgrade_unit_ingame" and upgradeRuleDue() then return "managed by wave auto-upgrade" end
+    return nil
+end
+function API:PauseWaveRules(paused)
+    local r=self.autoRuntime
+    r.paused=paused~=false
+    r.generation=r.generation+1
+    r.status=r.paused and "Wave rules paused" or "Wave rules running"
+end
+function API:SetWaveRules(patch)
+    check(type(patch)=="table","Wave-rule patch must be a table")
+    local merged=normalizeWaveRules(self.autoRules)
+    for _,kind in ipairs({"upgrade","sell"}) do
+        if patch[kind]~=nil then
+            check(type(patch[kind])=="table","Invalid " .. kind .. " settings")
+            for key,value in pairs(patch[kind]) do merged[kind][key]=value end
+        end
+    end
+    self.autoRules=normalizeWaveRules(merged)
+    if self.document then self.document.autoRules=normalizeWaveRules(self.autoRules) end
+    local r=self.autoRuntime
+    r.generation,r.paused,r.nextAt,r.perUnit=r.generation+1,false,0,{}
+    r.status="Wave rules updated; settings are saved with the macro"
+    return self.autoRules
+end
+function API:SaveWaveRules(name)
+    name=name or self.name
+    filePath(name)
+    check(self.mode=="idle","Stop the active operation before saving rules")
+    if not self.document or self.name~=name then
+        local exists,text=pcall(readfile,filePath(name))
+        if exists then self.document=validate(Http:JSONDecode(text))
+        else self.document={format="AA-Macro",version=2,complete=true,profileOnly=true,placeId=game.PlaceId,
+            userId=Player.UserId,mapKey=mapKey(),anchor="manual",duration=0,units={},actions={}} end
+    end
+    return self:Save(name)
+end
+
+local function automationStillActive(call)
+    local r=API.autoRuntime
+    return API.alive and r.call==call and not r.paused and r.generation==call.generation
+        and flag("GameStarted")==true and flag("GameFinished")~=true
+end
+local function markAutoSold(model)
+    local ctx=API.context
+    if ctx and not ctx.recording and ctx.byModel[model] then
+        ctx.autoSold[ctx.byModel[model]]=true
+    end
+end
+local function performAutomation(call)
+    local r=API.autoRuntime
+    if not automationStillActive(call) or owned(call.model)~=true or unitModel(call.model)~=call.model then return end
+    if call.kind=="upgrade" and not upgradeRuleDue() then return end
+    if call.kind=="sell" and not sellRuleDue() then return end
+    local remote=checkRemote(call.kind=="sell" and "sell_unit_ingame" or "upgrade_unit_ingame","InvokeServer")
+    call.sentAt=os.clock()
+    r.status=(call.kind=="sell" and "Selling " or "Upgrading ") .. call.model.Name
+    local result=pack(pcall(function() return remote:InvokeServer(call.model) end))
+    call.returned=true
+    if not automationStillActive(call) then return end
+    check(result[1],tostring(result[2]))
+    local removed=unitModel(call.model)~=call.model
+    local level=currentLevel(call.model)
+    local changed=call.kind=="sell" and removed or call.kind=="upgrade" and level and level>call.beforeLevel
+    local state=r.perUnit[call.model] or {failures=0}
+    r.perUnit[call.model]=state
+    if isRejected(result) and not changed then
+        local reason=tostring(result[3] or "Game rejected the request")
+        state.failures=(state.failures or 0)+1
+        state.nextAt=os.clock()+math.min(5,0.5*2^math.min(state.failures,4))
+        if call.kind=="upgrade" then
+            local lower=reason:lower()
+            if lower:find("max",1,true) or lower:find("fully upgraded",1,true) then state.doneLevel=call.beforeLevel end
+        end
+        r.status="Waiting: " .. reason
+        return
+    end
+    local deadline=os.clock()+(Options.ConfirmTimeout or 8)
+    while automationStillActive(call) and not changed and os.clock()<deadline do
+        task.wait(0.05)
+        removed=unitModel(call.model)~=call.model
+        level=currentLevel(call.model)
+        changed=call.kind=="sell" and removed or call.kind=="upgrade" and level and level>call.beforeLevel
+    end
+    if not automationStillActive(call) then return end
+    if not changed then
+        state.blockedKind=call.kind
+        r.status="Unconfirmed " .. call.kind .. "; this unit is paused to prevent duplicate requests"
+        return
+    end
+    state.failures,state.nextAt=0,os.clock()+0.25
+    if call.kind=="sell" then markAutoSold(call.model); r.status="Sold unit at wave " .. tostring(Clock.sample.wave)
+    else r.status="Upgrade confirmed: level " .. tostring(level) end
+end
+
+local function automationTick(now)
+    local r,s=API.autoRuntime,Clock.sample
+    if r.call then
+        if not r.call.returned and now-r.call.started>(Options.CallTimeout or 8) then
+            r.paused=true
+            r.status="Wave-rule request timed out; paused while the request is unresolved"
+        end
+        return
+    end
+    if r.paused or not s or not s.started or s.finished or not finite(s.wave) then return end
+    if not API.autoRules.upgrade.enabled and not API.autoRules.sell.enabled then r.status="Wave rules are off"; return end
+    if r.lastWave and s.wave<r.lastWave then r.perUnit,r.cursor={},0; r.generation=r.generation+1 end
+    r.lastWave=s.wave
+    if now<r.nextAt then return end
+    local ctx=API.context
+    if API.mode=="playing" and ctx and ctx.busy then return end
+    local kind=sellRuleDue() and "sell" or upgradeRuleDue() and "upgrade" or nil
+    if not kind then r.status="Waiting for a configured wave"; return end
+    local folder=unitsFolder()
+    if not folder then return end
+    local models=folder:GetChildren()
+    if #models==0 then r.status="No placed units"; return end
+    for offset=1,#models do
+        local index=(r.cursor+offset-1)%#models+1
+        local model=models[index]
+        if model:IsA("Model") and owned(model)==true then
+            local state=r.perUnit[model] or {}
+            local level=currentLevel(model)
+            local target=API.autoRules.upgrade.targetLevel
+            local eligible=state.blockedKind~=kind and now>=(state.nextAt or 0)
+            if kind=="upgrade" then
+                eligible=eligible and level~=nil and (target==0 or level<target) and state.doneLevel~=level
+            end
+            if eligible then
+                r.cursor=index
+                r.nextAt=now+(Options.AutoActionInterval or 0.35)
+                local call={kind=kind,model=model,beforeLevel=level,generation=r.generation,started=now,returned=false}
+                r.call=call
+                task.spawn(function()
+                    local ok,err=pcall(performAutomation,call)
+                    if r.call==call then r.call=nil end
+                    if not ok and API.alive then
+                        r.paused,r.status=true,"Wave rules stopped: " .. tostring(err)
+                    end
+                end)
+                return
+            end
+        end
+    end
+    r.status=kind=="sell" and "No eligible units remain to sell" or "Targets reached, maxed, or waiting for funds"
+end
+
+
 local prevStarted,prevFinished,prevWave=flag("GameStarted"),flag("GameFinished"),workspaceNumber("_wave_num")
-local lastDraft,lastUI=0,0
+local lastUI=0
 local function tick()
     if not API.alive then return end
     local now=os.clock()
@@ -5051,12 +5275,8 @@ local function tick()
         if sample.source=="replicated wave timer" or sample.source=="replicated timestamp" then
             if sample.kind=="elapsed" or sample.kind=="remaining" then ctx.doc.clockKind=sample.kind end
         end
-        if now-lastDraft>=5 then
-            lastDraft=now; ctx.doc.duration=now-ctx.start
-            local text=Http:JSONEncode(ctx.doc); local path=filePath(API.name,".draft.json")
-            task.defer(function() if API.alive then pcall(writefile,path,text) end end)
-        end
     elseif API.mode=="playing" then playTick(API.context,now) end
+    automationTick(now)
     if API.mode=="waiting_round" and API.loop and API.autoReplay and finished==true and not API.voted then
         API.voted=true
         local ctx,vote=API.context,API.document.replayVote
@@ -5089,7 +5309,8 @@ end)
 function API:SaveDiagnostics()
     local data = {version=2,mode=self.mode,message=self.message,clock=Clock.sample,history=Clock.history,
         counts=self:Counts(),timingMode=self.timingMode,latePolicy=self.latePolicy,
-        placeId=game.PlaceId,unitModels={},capture="passive tail forwarding",recentActions={},
+        placeId=game.PlaceId,unitModels={},capture="passive tail forwarding",recentActions={},autoRules=self.autoRules,
+        waveRuleStatus=self.autoRuntime.status,waveRulesPaused=self.autoRuntime.paused,
         playback=self.context and not self.context.recording and self.context.audit or nil,
         activeRequest=self.context and self.context.activeAudit or nil,uiError=self.uiError}
     local actions=self.document and self.document.actions or {}
@@ -5143,7 +5364,7 @@ if Options.ShowUI~=false then
     local app=MattLib.new({id="aa-macro-v2",design="Vector",wallpaperAssets=false,capabilities={},
         onError=function(message) notify("UI: " .. tostring(message)) end})
     API.uiApp=app
-    local window=app:CreateWindow({Id="macro",Title="AA Macro 2.0",Design="Vector",Size={800,620},
+    local window=app:CreateWindow({Id="macro",Title="MAA 2.1",Design="Vector",Size={800,620},
         MinSize={520,400},OpenKey="RightControl",OnClose=function() API:Shutdown() end})
     API.uiWindow=window
     local function try(fn)
@@ -5164,6 +5385,7 @@ if Options.ShowUI~=false then
     files:AddButton({Title="Arm recording for next match",Callback=function() try(function() API:Record(name:GetValue(),"match") end) end})
     files:AddButton({Title="Stop / save recording",Callback=function() try(function() API:Stop() end) end})
     files:AddButton({Title="Load JSON",Callback=function() try(function() API:Load(name:GetValue()) end) end})
+    files:AddButton({Title="Remove old helper JSONs",Callback=function() try(function() API:CleanupOldHelpers() end) end})
     files:AddButton({Title="Refresh file list",Callback=function() try(function()
         local list=API:ListMacros(); if #list==0 then list={"(enter a name above)"} end
         -- Set an empty value before replacing options so a removed file is valid.
@@ -5202,6 +5424,35 @@ if Options.ShowUI~=false then
         Callback=function(value) Options.ReadyTimeout=value end})
     sync:AddParagraph({Content="Adaptive uses the replicated wave timer when available. It can catch up late actions in order and wait for rejected unit actions to become ready. If no trustworthy time is available, it waits for a wave boundary. Wave only deliberately ignores within-wave time."})
     local clockLabel=sync:AddParagraph({Content="Reading the game clock..."})
+    local automation=window:AddTab({Title="Wave rules",Icon="controls",Columns=2,MinColumnWidth=260,Gap=12})
+    local up=automation:AddSection({Title="Auto upgrade",Description="Applies to all your placed units."})
+    local u,s=API.autoRules.upgrade,API.autoRules.sell
+    local function changeRule(patch)
+        if not API.syncingRuleUI then try(function() API:SetWaveRules(patch) end) end
+    end
+    local upgradeToggle=up:AddToggle({Title="Enable auto upgrade",Default=u.enabled,
+        Callback=function(value) changeRule({upgrade={enabled=value}}) end})
+    local upgradeStart=up:AddNumericInput({Title="Upgrade from wave",Default=u.startWave,Min=0,Max=9999,Step=1,
+        Callback=function(value) changeRule({upgrade={startWave=value}}) end})
+    local upgradeStop=up:AddNumericInput({Title="Upgrade through wave (0 = no end)",Default=u.stopWave,Min=0,Max=9999,Step=1,
+        Callback=function(value) changeRule({upgrade={stopWave=value}}) end})
+    local upgradeTarget=up:AddNumericInput({Title="Target upgrade level (0 = Max)",Default=u.targetLevel,Min=0,Max=9999,Step=1,
+        Callback=function(value) changeRule({upgrade={targetLevel=value}}) end})
+    local sale=automation:AddSection({Title="Auto sell",Description="Applies to all your placed units."})
+    local sellToggle=sale:AddToggle({Title="Enable auto sell",Default=s.enabled,
+        Callback=function(value) changeRule({sell={enabled=value}}) end})
+    local sellWave=sale:AddNumericInput({Title="Sell from wave (inclusive)",Default=s.wave,Min=0,Max=9999,Step=1,
+        Callback=function(value) changeRule({sell={wave=value}}) end})
+    sale:AddParagraph({Content="From the sell wave onward, selling takes priority and newly placed owned units are also sold. Future unit steps in the macro are skipped in this phase."})
+    local manage=automation:AddSection({Title="Control & save"})
+    manage:AddButton({Title="Save wave rules in this macro JSON",Callback=function() try(function() API:SaveWaveRules(name:GetValue()) end) end})
+    manage:AddButton({Title="Pause wave rules",Callback=function() API:PauseWaveRules(true) end})
+    manage:AddButton({Title="Resume wave rules",Callback=function() API:PauseWaveRules(false) end})
+    manage:AddButton({Title="Stop everything",Callback=function() try(function() API:Stop() end) end})
+    manage:AddParagraph({Content="Both rules start off. They run when enabled during an active match, even without macro playback. Save stores the rules inside the same JSON as the recording. During an active upgrade window, the rule manages upgrades in place of recorded upgrade steps."})
+    local ruleStatus=manage:AddParagraph({Content="Wave rules are off"})
+
+
     local diagnostics=window:AddTab({Title="Diagnostics",Icon="settings"})
     local help=diagnostics:AddSection({Title="Capture & recovery"})
     help:AddParagraph({Content="Recording forwards the original request immediately. Processing and confirmation happen later. Spawn uses the recorded inventory UUID and all 12 CFrame components; priority keeps the exact supplied value, such as flying. Sold models retain their macro identity after moving to ReplicatedStorage."})
@@ -5222,8 +5473,17 @@ if Options.ShowUI~=false then
         if fraction~=lastProgress then progress:SetValue(fraction); lastProgress=fraction end
         if repeatControl:GetValue()~=API.loop then repeatControl:SetValue(API.loop) end
         if replayControl:GetValue()~=API.autoReplay then replayControl:SetValue(API.autoReplay) end
+        API.syncingRuleUI=true
+        local rules=API.autoRules
+        for _,pair in ipairs({{upgradeToggle,rules.upgrade.enabled},{upgradeStart,rules.upgrade.startWave},
+            {upgradeStop,rules.upgrade.stopWave},{upgradeTarget,rules.upgrade.targetLevel},
+            {sellToggle,rules.sell.enabled},{sellWave,rules.sell.wave}}) do
+            if pair[1]:GetValue()~=pair[2] then pair[1]:SetValue(pair[2]) end
+        end
+        API.syncingRuleUI=false
+        ruleStatus:Update({Content=(API.autoRuntime.paused and "PAUSED | " or "") .. API.autoRuntime.status})
     end
     API.updateUI()
 end
-notify("v2.0 ready: MattLib UI, passive recording and wave-aware timing.")
+notify("MAA 2.1 ready: one macro JSON and optional wave rules.")
 return API

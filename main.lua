@@ -3899,7 +3899,8 @@ end
 return __require("init")
 
 ]====]
--- MAA v2.4 -- Auto Vote Start, Record/Play toggles, Auto Replay and wave rules.
+-- MAA v2.5 -- Match controls, automatic continuation and teleport resume.
+local Resume=...
 -- MattLib 1.2.1 is embedded, pinned and MIT licensed. No runtime downloads.
 -- Records request timestamps, not guaranteed server execution timestamps.
 local ENV = getgenv and getgenv() or _G
@@ -3944,6 +3945,7 @@ local function normalizeWaveRules(rules)
     local u,s=part(rules.upgrade,"Upgrade rule"),part(rules.sell,"Sell rule")
     local replay=part(rules.replay,"Replay rule")
     local start=part(rules.start,"Start-vote rule")
+    local m=part(rules.match,"Match rules")
     local function enabled(value)
         check(value==nil or type(value)=="boolean","Rule enabled must be true or false")
         return value==true
@@ -3962,6 +3964,8 @@ local function normalizeWaveRules(rules)
         stopWave=integer(u.stopWave,0,"Upgrade stop wave"),targetLevel=integer(u.targetLevel,0,"Target upgrade")},
         sell={enabled=enabled(s.enabled),wave=integer(s.wave,20,"Sell wave")},
         start={enabled=enabled(start.enabled)},
+        match={skipWave=enabled(m.skipWave),nextStory=enabled(m.nextStory),nextRoom=enabled(m.nextRoom),
+            nextPortal=enabled(m.nextPortal),leave=enabled(m.leave),fastForward=enabled(m.fastForward)},
         replay={enabled=enabled(replay.enabled),repeatMacro=enabled(replay.repeatMacro),
             autoStart=replay.autoStart==nil and true or enabled(replay.autoStart),
             delay=seconds(replay.delay,2,"Replay delay"),retryDelay=seconds(replay.retryDelay,3,"Replay retry delay"),
@@ -4155,7 +4159,7 @@ local function firstPosition(value, seen)
     return nil
 end
 
-local API = {mode = "idle", message = "Ready", loop = false, autoReplay = false,
+local API: any = {mode = "idle", message = "Ready", loop = false, autoReplay = false,
     document = nil, name = "namek_run", generation = 0, connections = {}, alive = true, queue = {},
     timingMode = Options.TimingMode or "Adaptive", latePolicy = Options.LatePolicy or "Catch up", timeOffset = 0}
 local Bridge = ENV.__AA_MACRO_BRIDGE_V3
@@ -4503,7 +4507,7 @@ function API:Save(name)
     check(self.mode~="recording" and self.mode~="record_armed","Stop recording before saving")
     check(self.document~=nil,"There is no recording to save")
     self.document.autoRules=normalizeWaveRules(self.autoRules)
-    self.document.appVersion="2.4.0"
+    self.document.appVersion="2.5.0"
     local doc=validate(self.document)
     local path=filePath(name)
     local text=Http:JSONEncode(doc)
@@ -4634,6 +4638,7 @@ function API:Stop()
     self.learnReplay = false
     if self.mode == "recording" or self.mode == "record_armed" then return self:StopRecording() end
     abort("Stopped")
+    return nil
 end
 
 local function isRejected(results)
@@ -4953,6 +4958,9 @@ end
 local function performEntry(ctx,entry,late)
     local row = {seq=entry.seq,remote=entry.remote,scheduled=entry.t,sync=entry.sync,attempts={},late=late == math.huge and "past wave" or late}
     ctx.activeAudit=row
+    if entry.remote=="vote_wave_skip" and API:_SkipVoteManaged() then
+        auditFinish(ctx,entry,row,"skipped","wave skip vote already sent"); return
+    end
     if entry.remote=="vote_start" and API:_StartVoteManaged() then
         auditFinish(ctx,entry,row,"skipped","match started or start vote already sent"); return
     end
@@ -5000,7 +5008,8 @@ local function performEntry(ctx,entry,late)
                 return remote:FireServer(unpackArgs(args,1,args.n))
             end))
             ctx.requestDone = true
-            if entry.remote=="vote_start" then API:_TrackStartVote(result) end
+            if entry.remote=="vote_start" then API:_TrackStartVote(result)
+            elseif entry.remote=="vote_wave_skip" then API:_TrackSkipVote(result) end
             if not active(ctx) then return end
             check(result[1],"Request error: " .. tostring(result[2]))
             if isRejected(result) then
@@ -5118,7 +5127,7 @@ end
 function API:SetWaveRules(patch)
     check(type(patch)=="table","Wave-rule patch must be a table")
     local merged=normalizeWaveRules(self.autoRules)
-    for _,kind in ipairs({"upgrade","sell","replay","start"}) do
+    for _,kind in ipairs({"upgrade","sell","replay","start","match"}) do
         if patch[kind]~=nil then
             check(type(patch[kind])=="table","Invalid " .. kind .. " settings")
             for key,value in pairs(patch[kind]) do merged[kind][key]=value end
@@ -5268,7 +5277,9 @@ end
 function API:_ConfigureReplay()
     local config=self.autoRules.replay
     local key=table.concat({tostring(config.enabled),tostring(config.repeatMacro),tostring(config.delay),
-        tostring(config.retryDelay),tostring(config.maxAttempts),tostring(config.autoStart)},"|")
+        tostring(config.retryDelay),tostring(config.maxAttempts),tostring(config.autoStart),
+        tostring(self.autoRules.match.nextStory),tostring(self.autoRules.match.nextRoom),
+        tostring(self.autoRules.match.nextPortal),tostring(self.autoRules.match.leave)},"|")
     local r=self.replayRuntime
     if r.config~=key then
         r.config=key
@@ -5298,8 +5309,7 @@ end
 API:_ConfigureReplay()
 
 local function wantsStartVote()
-    return API.autoRules.start.enabled or
-        (API.replayRuntime.awaitStart and API.autoReplay and API.autoRules.replay.autoStart)
+    return API.autoRules.start.enabled
 end
 function API:_ConfigureStartVote()
     local r,enabled=self.replayRuntime,self.autoRules.start.enabled
@@ -5387,6 +5397,183 @@ local function startVoteTick(now)
 end
 API:_ConfigureStartVote()
 
+API.matchRuntime={status="Match automation is off",skipStatus="Auto Skip Wave is off",skipWindow=0}
+local gameBridge,bridgeRetry=nil,0
+local function matchContext()
+    if type(Options.MatchContext)=="function" then return Options.MatchContext() or {} end
+    if not gameBridge and os.clock()>=bridgeRetry then
+        bridgeRetry=os.clock()+2
+        local ok,value=pcall(function()
+            local src=RS:FindFirstChild("src")
+            local module=src and src:FindFirstChild("Loader")
+            if not module then return nil end
+            local loader=require(module)
+            return {loader=loader,stats=loader.load_client_service(nil,"StatsServiceClient"),
+                gui=loader.load_client_service(nil,"GUIService"),
+                levelService=loader.load_core_service(nil,"LevelServiceCore"),
+                progression=loader.load_core_service(nil,"ProgressionServiceCore"),
+                tower=loader.load_core_service(nil,"InfiniteTowerServiceCore")}
+        end)
+        if ok then gameBridge=value else API.matchRuntime.contextError=tostring(value) end
+    end
+    local b=gameBridge
+    if not b then return {} end
+    return {level=b.loader.LevelData,isLobby=b.loader.IsLobby,session=b.stats and b.stats.session,
+        result=b.gui and b.gui.results_ui and b.gui.results_ui.settings,levelService=b.levelService,tower=b.tower,
+        progression=b.progression}
+end
+local function endRequest(id,label,remote,...)
+    return {id=id,label=label,remote=remote,method="InvokeServer",rawArgs=pack(...)}
+end
+function API:GetMatchInfo()
+    local c=matchContext()
+    return {levelId=c.level and c.level.id,mode=c.level and c.level._gamemode,
+        isLobby=c.isLobby,victory=c.result and c.result.victory,fastForwardAvailable=false}
+end
+function API:_ChooseEndAction()
+    local m=self.autoRules.match
+    if not m.leave and not m.nextStory and not m.nextRoom and not m.nextPortal then
+        if self.autoReplay then local vote=replayVote(); vote.id,vote.label="replay","Replay"; return vote end
+        return nil,"Match end automation is off"
+    end
+    local context=matchContext()
+    if context.isLobby then return nil,"Waiting outside the lobby" end
+    if m.leave then return endRequest("leave","Leave Match","teleport_back_to_lobby") end
+    local level=context.level
+    if type(level)~="table" then return nil,"Waiting for game level information" end
+    local result=context.result
+    if (m.nextStory and level._is_actual_storymode) or (m.nextRoom and level._gamemode=="infinite_tower")
+        or (m.nextPortal and level._is_map_or_portal_level) then
+        if not result or type(result.victory)~="boolean" then return nil,"Waiting for the match result" end
+        if result.victory or (m.nextPortal and level._is_map_or_portal_level) then
+            local owner=level._is_map_or_portal_level and level._owner_player_userid or level._owner_player_nonportal_userid
+            local partyOwner=Player:GetAttribute("PartyOwnerId")
+            if (level._is_actual_storymode or level._is_map_or_portal_level) and not tonumber(owner) then
+                return nil,"Waiting for host ownership information"
+            end
+            if (owner and tonumber(owner)~=Player.UserId)
+                or (partyOwner and tonumber(partyOwner)~=0 and tonumber(partyOwner)~=Player.UserId) then
+                return nil,"Waiting for the host to choose the next match"
+            end
+            if m.nextStory and level._is_actual_storymode then
+                -- The game's Next Story button is exposed only when another act exists.
+                local last=level._is_last_story_level
+                if context.hasNextStory==false or last==true then return nil,"No next story act is available" end
+                if context.progression and not context.progression.get_next_story_level(level.id) then
+                    return nil,"No next story act is available"
+                end
+                return endRequest("story","Next Story","set_game_finished_vote","next_story")
+            end
+            if m.nextRoom and level._gamemode=="infinite_tower" then
+                local group=context.groupReplayRoom
+                if context.tower then group=context.tower.get_group_replay_room(level,true) end
+                if group then return endRequest("room","Next Room","set_game_finished_vote","replay") end
+                return endRequest("room","Next Room","request_start_infinite_tower_from_game")
+            end
+            if m.nextPortal and level._is_map_or_portal_level then
+                local uuid=context.portalUUID
+                if not uuid and context.session and context.levelService then
+                    local cache=self.matchRuntime.portalCache
+                    if cache and cache.level==level and os.clock()<cache.nextAt then
+                        uuid=cache.uuid
+                    else
+                        local inventory=context.session.inventory
+                        local profile=inventory and inventory.inventory_profile_data
+                        for _,item in ipairs(profile and profile.unique_items or {}) do
+                            local candidate=item.uuid
+                            local unique=item._unique_item_data
+                            if type(candidate)=="string" and type(unique)=="table" and finite(unique._portal_max_tries) then
+                                local ok,valid=pcall(context.levelService.is_valid_replay_portal_item,context.session,candidate)
+                                if ok and valid then uuid=candidate; break end
+                            end
+                        end
+                        self.matchRuntime.portalCache={level=level,uuid=uuid,nextAt=os.clock()+1}
+                    end
+                end
+                if type(uuid)~="string" or uuid=="" then return nil,"No valid portal from this group is available" end
+                return endRequest("portal","Next Portal","set_game_finished_vote","replay",{item_uuid=uuid})
+            end
+        end
+    end
+    if self.autoReplay then local vote=replayVote(); vote.id,vote.label="replay","Replay"; return vote end
+    return nil,"No enabled action applies to this match/result"
+end
+
+function API:_SkipVoteManaged()
+    local r=self.matchRuntime
+    return r.skip and (r.skip.sent or r.skip.call~=nil)
+end
+function API:_TrackSkipVote(result)
+    local s=self.matchRuntime.skip
+    if not s then return end
+    if not result[1] then s.blocked=true; self.matchRuntime.skipStatus="Skip vote error: " .. tostring(result[2])
+    elseif isRejected(result) then s.nextAt=os.clock()+1; self.matchRuntime.skipStatus="Skip vote rejected; waiting to retry"
+    else s.sent=true; self.matchRuntime.skipStatus="Skip vote sent for this wave" end
+end
+local function skipWaveTick(now)
+    local r=API.matchRuntime
+    local pg=Player:FindFirstChild("PlayerGui")
+    local gui=pg and pg:FindFirstChild("VoteSkip")
+    local visible=gui and gui.Enabled==true or false
+    if visible and not r.skipVisible then r.skipWindow=r.skipWindow+1 end
+    r.skipVisible=visible
+    local wave=Clock.sample and Clock.sample.wave
+    local key=tostring(wave) .. ":" .. tostring(r.skipWindow)
+    if r.skip and r.skip.call then
+        r.skipStatus=now-r.skip.call.started>(Options.CallTimeout or 8)
+            and "Skip vote timed out; waiting for its result" or "Sending skip vote"
+        return
+    end
+    if flag("GameStarted")~=true or flag("GameFinished")==true then
+        r.skip,r.skipOpen=nil,false
+        r.skipStatus="Waiting for a match"
+        return
+    end
+    if finite(wave) then key="wave:" .. tostring(wave) end
+    if not r.skip or r.skip.key~=key then r.skip={key=key,attempts=0,sent=false,nextAt=0} end
+    local s=r.skip
+    if not API.autoRules.match.skipWave then r.skipStatus="Auto Skip Wave is off"; return end
+    if API.autoRuntime.paused then r.skipStatus="Auto Skip Wave paused"; return end
+    if not visible and not r.skipOpen then r.skipStatus="Waiting for a wave-skip vote"; return end
+    if s.sent then r.skipStatus="Skip vote sent for this wave"; return end
+    if s.blocked or now<s.nextAt then return end
+    if s.attempts>=3 then r.skipStatus="Skip vote rejected three times; waiting for a new vote"; return end
+    if API.mode=="finalizing" then return end
+    local container=endpoints()
+    if not container or not container:FindFirstChild("vote_wave_skip") then r.skipStatus="Waiting for the skip-vote endpoint"; return end
+    local call={started=now}; s.call=call
+    task.spawn(function()
+        if not API.alive or not API.autoRules.match.skipWave or API.autoRuntime.paused
+            or flag("GameStarted")~=true or flag("GameFinished")==true or (not r.skipVisible and not r.skipOpen) then
+            s.call=nil; return
+        end
+        s.attempts=s.attempts+1
+        local result=pack(pcall(function() return checkRemote("vote_wave_skip","InvokeServer"):InvokeServer() end))
+        s.call=nil
+        if API.alive and r.skip==s then API:_TrackSkipVote(result) end
+    end)
+end
+local function connectMatchSignals()
+    local container=RS:FindFirstChild("endpoints")
+    container=container and container:FindFirstChild("server_to_client")
+    if not container then return end
+    for _,name in ipairs({"start_vote_wave_skip","close_vote_prompts"}) do
+        local remote=container:FindFirstChild(name)
+        if remote and remote:IsA("BaseRemoteEvent") then
+            API.connections[#API.connections+1]=remote.OnClientEvent:Connect(function()
+                API.matchRuntime.skipOpen=name=="start_vote_wave_skip"
+                if API.matchRuntime.skipOpen then API.matchRuntime.skipWindow=API.matchRuntime.skipWindow+1 end
+            end)
+        end
+    end
+end
+connectMatchSignals()
+function API:SetMatchRule(key,enabled)
+    check(key=="skipWave" or key=="nextStory" or key=="nextRoom" or key=="nextPortal" or key=="leave" or key=="fastForward","Unknown match rule")
+    check(not (key=="fastForward" and enabled==true),"Fast Forward is not exposed by this game build")
+    self:SetWaveRules({match={[key]=enabled==true}})
+end
+
 local function finishMacroForReplay()
     if API.mode~="playing" then return end
     local ctx=API.context
@@ -5425,7 +5612,9 @@ local function replayTick(now)
         r.endAt,r.nextAt,r.attempts,r.sent,r.blocked=now,nil,0,false,false
     end
     finishMacroForReplay()
-    if not API.autoReplay then r.status="Auto Replay is off"; return end
+    if r.sent then r.status=(r.actionLabel or "Result action") .. " sent; waiting for players/server reset"; return end
+    local vote,waitReason=API:_ChooseEndAction()
+    if not vote then r.status=waitReason; return end
     if API.autoRuntime.paused then r.status="Auto Replay paused"; r.endAt=now; return end
     if API.mode=="recording" or API.mode=="finalizing" or API.learnReplay then
         r.status="Waiting for recording/learning to finish"; r.endAt=now; return
@@ -5436,25 +5625,26 @@ local function replayTick(now)
         end
         return
     end
-    if r.sent then r.status="Replay vote sent; waiting for players/server reset"; return end
+
     if r.blocked then return end
     if r.attempts>=config.maxAttempts then
         r.status="Replay rejected " .. r.attempts .. " times; re-enable Auto Replay to retry"
         return
     end
     local due=r.nextAt or ((r.endAt or now)+config.delay)
-    if now<due then r.status=string.format("Replay in %.1fs",due-now); return end
-    local vote=replayVote()
+    if now<due then r.status=string.format("%s in %.1fs",vote.label,due-now); return end
     local context=API.context or {doc=API.document or {units={}},bound={},byModel={},jobs={}}
     local call={started=now,session=r.session,returned=false}
     r.call=call
     r.attempts=r.attempts+1
-    r.status="Sending Replay vote (attempt " .. r.attempts .. ")"
+    r.actionLabel=vote.label
+    r.status="Sending " .. vote.label .. " (attempt " .. r.attempts .. ")"
     task.spawn(function()
-        if not API.alive or not API.autoReplay or API.autoRuntime.paused or flag("GameFinished")~=true
+        local selected=API:_ChooseEndAction()
+        if not API.alive or not selected or selected.id~=vote.id or API.autoRuntime.paused or flag("GameFinished")~=true
             or r.session~=call.session then if r.call==call then r.call=nil end; return end
         local result=pack(pcall(function()
-            local args=decodePacked(vote.args,context)
+            local args=vote.rawArgs or decodePacked(vote.args,context)
             local remote=checkRemote(vote.remote,vote.method)
             return remote:InvokeServer(unpackArgs(args,1,args.n))
         end))
@@ -5462,16 +5652,16 @@ local function replayTick(now)
         if r.call==call then r.call=nil end
         if not API.alive or r.session~=call.session or flag("GameFinished")~=true then return end
         if not result[1] then
-            r.blocked=true; r.status="Replay request error: " .. tostring(result[2])
+            r.blocked=true; r.status=vote.label .. " request error: " .. tostring(result[2])
             notify(r.status)
         elseif isRejected(result) then
             local reason=tostring(result[3] or "Game rejected the replay vote")
             r.nextAt=os.clock()+config.retryDelay
-            r.status="Replay rejected: " .. reason
+            r.status=vote.label .. " rejected: " .. reason
         else
             -- Preserve knowledge of a completed vote even if Stop was pressed
             -- while it was in flight. Do not spam accepted/unknown votes.
-            r.sent=true; r.status="Replay vote sent; waiting for players/server reset"
+            r.sent=true; r.status=vote.label .. " sent; waiting for players/server reset"
         end
     end)
 end
@@ -5496,6 +5686,7 @@ local function tick()
     end
     refreshFacts()
     replayTick(now)
+    skipWaveTick(now)
     if API.mode=="play_ready" then
         check(now-(API.readySince or now)<=(Options.ReadyTimeout or 45),"Map readiness timed out")
         beginPlayback()
@@ -5526,6 +5717,7 @@ function API:SaveDiagnostics()
         waveRuleStatus=self.autoRuntime.status,waveRulesPaused=self.autoRuntime.paused,
         replayStatus=self.replayRuntime.status,replayAttempts=self.replayRuntime.attempts,
         startVoteStatus=self.replayRuntime.startStatus,startVoteAttempts=self.replayRuntime.startAttempts,
+        skipVoteStatus=self.matchRuntime.skipStatus,matchContextError=self.matchRuntime.contextError,
         playback=self.context and not self.context.recording and self.context.audit or nil,
         activeRequest=self.context and self.context.activeAudit or nil,uiError=self.uiError}
     local actions=self.document and self.document.actions or {}
@@ -5568,6 +5760,54 @@ function API:ListMacros()
     return names
 end
 
+function API:_BuildResumeSource()
+    local data={format="MAA-Resume",name=self.name,play=self.mode=="playing" or self.mode=="play_ready"
+        or self.mode=="play_armed" or self.mode=="waiting_round",rules=normalizeWaveRules(self.autoRules),
+        timingMode=self.timingMode,latePolicy=self.latePolicy,timeOffset=self.timeOffset,timerSource=Options.TimerSource}
+    local encoded=Http:JSONEncode(data)
+    return "local resume=game:GetService('HttpService'):JSONDecode(" .. string.format("%q",encoded) .. ")\n"
+        .. "local source=game:HttpGet('https://raw.githubusercontent.com/Cybersize/MAA/main/main.lua?t=' .. tostring(os.time()))\n"
+        .. "return assert(loadstring(source,'@MAA/resume'))(resume)"
+end
+local queueTeleport=queue_on_teleport or queue_on_tp or queueonteleport or queueontp
+pcall(function()
+    API.connections[#API.connections+1]=Player.OnTeleport:Connect(function(state)
+        local name=tostring(state):match("([^%.]+)$")
+        if name=="Failed" then API.resumeQueued=false; return end
+        if name~="Started" or API.resumeQueued or not API.alive then return end
+        local m=API.autoRules.match
+        local active=API.mode~="idle" or API.autoReplay or API.autoRules.start.enabled
+            or m.skipWave or m.nextStory or m.nextRoom or m.nextPortal or m.leave
+        if not active then return end
+        if type(queueTeleport)~="function" then
+            notify("Teleport resume is unavailable in this executor; rerun the loader after joining")
+            return
+        end
+        local ok,err=pcall(queueTeleport,API:_BuildResumeSource())
+        API.resumeQueued=ok
+        if not ok then notify("Could not queue teleport resume: " .. tostring(err)) end
+    end)
+end)
+if type(Resume)=="table" and Resume.format=="MAA-Resume" then
+    local ok,err=pcall(function()
+        API.name=Resume.name or API.name
+        local loaded=pcall(function() API:Load(API.name) end)
+        API:SetWaveRules(Resume.rules or {})
+        API.timingMode=Resume.timingMode or API.timingMode
+        API.latePolicy=Resume.latePolicy or API.latePolicy
+        API.timeOffset=finite(Resume.timeOffset) and Resume.timeOffset or 0
+        Options.TimerSource=Resume.timerSource
+        if Resume.play and loaded then
+            API:SetLoop(true)
+            local config=workspace:FindFirstChild("_MAP_CONFIG")
+            local lobby=config and config:FindFirstChild("IsLobby")
+            if lobby and lobby.Value==true then API.mode="play_armed"; notify("Playback enabled; waiting to join a match")
+            else API:Play(nil,"auto") end
+        elseif Resume.play then notify("Settings restored; load the recording before enabling Play") end
+    end)
+    if not ok then notify("Resume stopped: " .. tostring(err)) end
+end
+
 if Options.ShowUI~=false then
     local MattLib=ENV.AA_MattLib
     if not MattLib then
@@ -5579,7 +5819,7 @@ if Options.ShowUI~=false then
     local app=MattLib.new({id="aa-macro-v2",design="Vector",wallpaperAssets=false,capabilities={},
         onError=function(message) notify("UI: " .. tostring(message)) end})
     API.uiApp=app
-    local window=app:CreateWindow({Id="macro",Title="MAA 2.4",Design="Vector",Size={800,620},
+    local window=app:CreateWindow({Id="macro",Title="MAA 2.5",Design="Vector",Size={800,620},
         MinSize={520,400},OpenKey="RightControl",OnClose=function() API:Shutdown() end})
     API.uiWindow=window
     local function try(fn)
@@ -5679,22 +5919,54 @@ if Options.ShowUI~=false then
         end
         syncingActions=false
     end
-    local autoStartControl=playback:AddToggle({Title="Auto Vote Start",Default=API.autoRules.start.enabled,
-        Description="Vote automatically before each match, including the first match.",
-        Callback=function(value) if not API.syncingStartUI then try(function() API:SetAutoVoteStart(value) end) end end})
-    local autoStartStatus=playback:AddParagraph({Content="Auto Vote Start is off"})
-    local replayControl=playback:AddToggle({Title="Auto Replay at match end",Default=API.autoReplay,Callback=function(value)
-        if not API.syncingReplayUI then try(function() API:SetAutoReplay(value) end) end
-    end})
-    local replayDelay=playback:AddNumericInput({Title="Replay delay (seconds)",Default=API.autoRules.replay.delay,Min=0,Max=60,Step=0.5,
-        Callback=function(value) if not API.syncingReplayUI then try(function() API:SetWaveRules({replay={delay=value}}) end) end end})
-    local replayStart=playback:AddToggle({Title="Auto-start replayed match",Default=API.autoRules.replay.autoStart,
-        Callback=function(value) if not API.syncingReplayUI then try(function() API:SetWaveRules({replay={autoStart=value}}) end) end end})
-    local replayStatus=playback:AddParagraph({Content="Auto Replay is off"})
+
     playback:AddButton({Title="Learn Replay arguments (optional override)",Callback=function() try(function() API:LearnReplay() end) end})
     local live=macro:AddSection({Title="Live status"})
     local state=live:AddParagraph({Content="Ready"})
     local progress=live:AddProgressBar({Default=0})
+    local matchTab=window:AddTab({Title="Match",Icon="controls",Columns=2,MinColumnWidth=260,Gap=12})
+    local matchSection=matchTab:AddSection({Title="MATCH"})
+    local function matchChange(fn)
+        if not API.syncingMatchUI then try(fn) end
+    end
+    local matchControls={}
+    matchControls.start=matchSection:AddToggle({Title="Auto Start Game",Default=API.autoRules.start.enabled,
+        Callback=function(value) matchChange(function() API:SetAutoVoteStart(value) end) end})
+    matchControls.skipWave=matchSection:AddToggle({Title="Auto Skip Wave",Default=API.autoRules.match.skipWave,
+        Callback=function(value) matchChange(function() API:SetMatchRule("skipWave",value) end) end})
+    matchControls.replay=matchSection:AddToggle({Title="Auto Replay",Default=API.autoReplay,
+        Callback=function(value) matchChange(function() API:SetAutoReplay(value) end) end})
+    for _,pair in ipairs({{"nextStory","Auto Next Story"},{"nextRoom","Auto Next Room"},
+        {"nextPortal","Auto Next Portal"},{"leave","Auto Leave Match"}}) do
+        local key,title=pair[1],pair[2]
+        matchControls[key]=matchSection:AddToggle({Title=title,Default=API.autoRules.match[key],
+            Callback=function(value) matchChange(function() API:SetMatchRule(key,value) end) end})
+    end
+    matchControls.fastForward=matchSection:AddToggle({Title="Auto Fast Forward Speed",Default=false,Disabled=true,
+        Description="Unavailable: this game build exposes no Fast Forward control."})
+    local matchSettings=matchTab:AddSection({Title="Match settings & status"})
+    local replayDelay=matchSettings:AddNumericInput({Title="Result action delay (seconds)",Default=API.autoRules.replay.delay,Min=0,Max=60,Step=0.5,
+        Callback=function(value) matchChange(function() API:SetWaveRules({replay={delay=value}}) end) end})
+    matchSettings:AddParagraph({Content="Play repeats at every new match while enabled. At results: Leave takes priority, then the matching Next option after a win, then Replay. Next Portal uses an available valid portal from the same group. All settings save inside the same macro JSON."})
+    matchSettings:AddButton({Title="Save Match settings in this macro JSON",Callback=function() try(function() API:SaveWaveRules(name:GetValue()) end) end})
+    matchSettings:AddButton({Title="Resume match automation",Callback=function() API:PauseWaveRules(false) end})
+    matchSettings:AddButton({Title="Stop everything",Callback=function() try(function() API:Stop() end) end})
+    local matchStatus=matchSettings:AddParagraph({Content="Match automation is off"})
+    local function syncMatchUI()
+        API.syncingMatchUI=true
+        for key,control in pairs(matchControls) do
+            local value=key=="start" and API.autoRules.start.enabled or key=="replay" and API.autoReplay
+                or key~="start" and key~="replay" and API.autoRules.match[key] or false
+            if key=="fastForward" then value=false end
+            if control:GetValue()~=value then control:SetValue(value) end
+        end
+        if replayDelay:GetValue()~=API.autoRules.replay.delay then replayDelay:SetValue(API.autoRules.replay.delay) end
+        API.syncingMatchUI=false
+        matchStatus:Update({Content=(API.autoRuntime.paused and "PAUSED\n" or "") ..
+            (API.replayRuntime.startStatus or "Waiting for match flags") .. "\n" .. API.matchRuntime.skipStatus ..
+            "\n" .. API.replayRuntime.status})
+    end
+
     local timing=window:AddTab({Title="Timing",Icon="activity"})
     local sync=timing:AddSection({Title="Game clock"})
     sync:AddDropdown({Title="Scheduling",Options={"Adaptive","Wave only","Offsets"},Default=API.timingMode,
@@ -5749,10 +6021,7 @@ if Options.ShowUI~=false then
     local lastState,lastClock,lastProgress
     API.updateUI=function()
         syncActions()
-        API.syncingStartUI=true
-        if autoStartControl:GetValue()~=API.autoRules.start.enabled then autoStartControl:SetValue(API.autoRules.start.enabled) end
-        API.syncingStartUI=false
-        autoStartStatus:Update({Content=API.replayRuntime.startStatus or "Auto Vote Start is off"})
+        syncMatchUI()
         local c,ctx=API:Counts(),API.context
         local count=API.document and #API.document.actions or 0
         local text=string.format("%s\n%d recorded  |  %d pending  |  %d unconfirmed\n%s",API.mode,c.successful,c.pending,c.failed,API.message)
@@ -5763,12 +6032,7 @@ if Options.ShowUI~=false then
         if clockText~=lastClock then clockLabel:Update({Content=clockText}); lastClock=clockText end
         local fraction=count>0 and ctx and math.min(1,math.max(0,(ctx.index-1)/count)) or 0
         if fraction~=lastProgress then progress:SetValue(fraction); lastProgress=fraction end
-        API.syncingReplayUI=true
-        if replayControl:GetValue()~=API.autoReplay then replayControl:SetValue(API.autoReplay) end
-        if replayDelay:GetValue()~=API.autoRules.replay.delay then replayDelay:SetValue(API.autoRules.replay.delay) end
-        if replayStart:GetValue()~=API.autoRules.replay.autoStart then replayStart:SetValue(API.autoRules.replay.autoStart) end
-        API.syncingReplayUI=false
-        replayStatus:Update({Content=API.replayRuntime.status})
+
         API.syncingRuleUI=true
         local rules=API.autoRules
         for _,pair in ipairs({{upgradeToggle,rules.upgrade.enabled},{upgradeStart,rules.upgrade.startWave},
@@ -5781,5 +6045,5 @@ if Options.ShowUI~=false then
     end
     API.updateUI()
 end
-notify("MAA 2.4 ready: Auto Vote Start can vote before every match.")
+notify("MAA 2.5 ready: configure the Match tab for start, skip and continuation.")
 return API

@@ -1,4 +1,4 @@
-MAA 2.4 validation
+MAA 2.5 validation
 
 The bundle compiles with official Luau 0.745. Its embedded MattLib 1.2.1 source remains pinned to `bb9187fa8be705a5b7225904b0dd737c9f612035`, with its license and hash in the file header.
 
@@ -22,9 +22,9 @@ The bundle compiles with official Luau 0.745. Its embedded MattLib 1.2.1 source 
 16. Auto-sell skips future unit actions/placements without breaking playback.
 17. Invalid rule settings are rejected before replacing loaded settings.
 
-17 integration checks passed with the actual MattLib bundle under official Luau. They cover four-tab mounting; wave-rule callbacks; Auto Replay/delay controls; Record on/off with one-file saving; all four designs; UI replacement; shutdown cleanup; next-match recording cancellation; Play on/off; next-match playback cancellation; conflicting-control disabling; state synchronization after API calls and errors; failed-load rollback; rapid-click deduplication; readiness and automatic repetition; disabled toggles during finalization; and Auto Vote Start control synchronization. The UI checks confirm that Play repeats automatically even with a legacy repeat-off preference, stays enabled after completion, and restarts on the next match without a separate Repeat control.
+18 integration checks passed with the actual MattLib bundle under official Luau. They cover four-tab mounting; wave-rule callbacks; Auto Replay/delay controls; Record on/off with one-file saving; all four designs; UI replacement; shutdown cleanup; next-match recording cancellation; Play on/off; next-match playback cancellation; conflicting-control disabling; state synchronization after API calls and errors; failed-load rollback; rapid-click deduplication; readiness and automatic repetition; disabled toggles during finalization; and Auto Vote Start control synchronization. The UI checks confirm that Play repeats automatically even with a legacy repeat-off preference, stays enabled after completion, and restarts on the next match without a separate Repeat control.
 
-Together with the 59 existing core scenarios and 16 Auto Vote Start scenarios below, this is 92 passing local checks. Native toggle activation is exercised through MattLib's TextButton Activated signals in its engine double.
+Together with the 59 existing core scenarios and 16 Auto Vote Start scenarios below, the baseline contributes 92 passing local checks; Match adds 17 more, for 109 total. Native toggle activation is exercised through MattLib's TextButton Activated signals in its engine double.
 
 These checks establish behavior only in the stated local doubles. No live-game RPCs were executed. They do not establish executor compatibility, real timer semantics, actual server acceptance, physical UI input behavior, or native visual appearance.
 
@@ -71,3 +71,18 @@ No live server Replay/start votes were sent during these tests. The default Repl
 14. Replay and the standalone toggle share one start vote per reset.
 15. Recorded start votes prevent duplicate automatic votes.
 16. Automatic start votes cause overdue recorded start votes to be skipped.
+
+
+## Match update validation
+
+The update adds 16 core scenarios covering default-off rules and schema validation; story victory, outcome/host/next-act gating, and loss fallback; solo/group tower routing; portal argument tables, defeat continuation, inventory filtering and bounded scanning; Leave precedence; prevention of conflicting result requests; skip-window gating and per-wave deduplication; bounded skip retries and Stop; unresolved skip calls; one-file settings round trips; real queued-source playback restoration in a simulated new client; and idle/failed-teleport/shutdown behavior.
+
+The eighteenth MattLib integration check verifies the eight named Match controls, callbacks, and disabled unsupported Fast Forward control. The UI suite now mounts five tabs. Luau compilation passed. Real's static checker reports zero errors and warnings for the core and for the live wrapper with its injected STATE declaration supplied to the checker.
+
+## Live evidence
+
+The connected game's client handlers confirm the actual requests: vote_start(), vote_wave_skip(), set_game_finished_vote("replay"), set_game_finished_vote("next_story"), request_start_infinite_tower_from_game(), group tower replay voting, set_game_finished_vote("replay", {item_uuid=...}), and teleport_back_to_lobby(). Story/portal ownership and portal-group validity checks follow the game's client rules. The indexed snapshot covered 1,605 scripts from place 14229839966, version 637.
+
+The MAA 2.5 bundle was loaded through Real live-reload using the stable MAA label. The live UI mounted five tabs, the Match tab rendered all eight controls, the adapter read mode infinite and level namek_infinite, and the client console reported no MAA runtime errors. All automatic controls remained off. No MAA progression, purchase, sale, skip, leave, or teleport request was sent during this check. This verifies UI/runtime startup and read-only bindings, not successful end-to-end server progression.
+
+No Fast Forward control/request was found in the connected build's endpoints, UI, or indexed client handler searches. The requested control is displayed disabled with that limitation. No working speed change is claimed.

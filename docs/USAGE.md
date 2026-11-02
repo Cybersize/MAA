@@ -1,75 +1,78 @@
-MAA 2.4
+# MAA 2.5
 
-Run the same GitHub loader to get the current version:
+Run the same GitHub loader to receive the latest version:
 
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/Cybersize/MAA/main/loader.lua"))()
 ```
 
-You can also run the local `MAA.lua` file. The panel should show **MAA 2.4**. MattLib 1.2.1 is embedded with its MIT notice; no separate UI download is needed. Right Ctrl hides/shows the window. The designs are selectable in Diagnostics.
+The panel should show **MAA 2.5**. MattLib 1.2.1 remains embedded. Right Ctrl hides/shows the window. Choose a design in Diagnostics.
 
-One recording file
+## Match controls
 
-Normal saving now writes only `AA_Macros/<name>.json` inside the executor workspace. It contains the actions, wave/time data, unit identities, replay vote, and wave-rule settings. No automatic draft, staged, backup, or last-playback JSON is created. The previous file is held in memory during write verification so a recoverable write failure can restore it. Unfinished recordings and playback diagnostics stay in memory until explicitly saved/exported.
+The **Match** tab contains the eight controls from the supplied screenshot. Every supported control defaults off.
 
-After a successful save, old helper files for that recording are removed when `delfile` is available. **Remove old helper JSONs** cleans other profiles too. Cleanup first validates the main recording; if it is missing or corrupt, recovery files are retained. Main recordings are never deleted by cleanup. Manual diagnostics exports are retained.
+| Control | Behavior |
+| --- | --- |
+| Auto Start Game | Sends one start vote before the first match and each new match. Waits for flags/map readiness and skips lobbies and already-started games. |
+| Auto Skip Wave | Votes when the server opens a wave-skip window. Shares tracking with recorded votes and sends at most one accepted vote per wave. |
+| Auto Replay | Sends the game's Replay request after results. An optional learned argument override remains on Macro for compatibility. |
+| Auto Next Story | After a story victory, requests the next act if it exists and you are the host. |
+| Auto Next Room | After an Infinity Tower victory, uses the game's solo or group next-room path. |
+| Auto Next Portal | Selects the first available valid portal from the same group in your inventory and sends its UUID. Requires host ownership. It can continue after victory or defeat, consuming a portal through the normal game request. |
+| Auto Leave Match | Returns to the lobby after the match ends. Takes priority over the other result actions. |
+| Auto Fast Forward Speed | Unavailable and disabled. The connected game build exposes no matching speed control or request. No speed change is claimed. |
 
-If `makefolder` is unavailable, the same files use the prefix `AA_Macro_` in the executor's workspace root. Local recordings are not uploaded to GitHub.
+Result actions use **Result action delay (seconds)**, default `2`. When several result controls are on, **Leave → matching Next action → Replay** determines the single request. Next Story/Room apply after a win; Replay can handle a loss. Missing results, host ownership, the next act, or a valid portal are shown as waiting states.
 
-Recording and playback
+Accepted/unknown-successful result votes are remembered until an actual reset, including after settings changes. Explicit rejections have bounded retries. Errors and unresolved calls are not repeatedly sent. Start voting has up to three automatic attempts spaced three seconds apart; skip voting has up to three attempts spaced one second apart within the open window.
 
-1. Give the macro a name. Choose **Record start → This match** or **Next match**, then switch **Record ON**. Next match keeps the toggle on while waiting for a new match.
-2. Place, upgrade, change priority, sell, and use supported abilities/votes normally. Spawn preserves the UUID and all CFrame components. Sold models retain their macro identity after moving to ReplicatedStorage.
-3. Switch **Record OFF** to stop and save the same JSON. Switching it off before an armed recording starts only cancels the wait. While saving, both toggles are disabled and the panel shows **Saving recording...**. Placement confirmation waits for its live unit; unavailable confirmation fields are marked `request only` in JSON. Unconfirmed attempts remain marked and are skipped during playback.
-4. On the same account/map with the same unit inventory, choose the macro name and set **Play start → Sync current match** or **Next match**. Switch **Play ON**; it loads the named JSON when needed. Switch **Play OFF** to stop or cancel a pending start. The timing defaults are **Adaptive / Catch up / Auto**.
-5. **Play ON always repeats automatically.** After completion or an early loss, Play stays on and waits for the next match. Each new match restarts the macro. There is no separate Repeat toggle. Switch Play off to cancel playback and future repeats. A failed start or playback error switches it off. Record and Play cannot run together; conflicting controls are disabled. Rapid clicks do not create duplicate sessions.
-6. Switching either active toggle off and **Stop everything** pause wave rules and Auto Replay as well. A request already sent to the server can still finish. Starting recording/playback resumes configured rules; standalone rules also have explicit Pause/Resume buttons.
+Start Game is independent of Replay. There is no second replay-specific start toggle. To automate a normal repeat cycle, enable **Play**, **Auto Start Game**, and **Auto Replay**. Add Auto Skip Wave if wanted. Enable the relevant Next control for progression. Auto Leave overrides the other result controls.
 
-Auto Vote Start
+**Stop everything** pauses Match automation, playback, and wave rules. **Resume match automation** resumes enabled automatic controls. Save with **Save Match settings in this macro JSON** or the existing wave-rule save button.
 
-The **Macro → Auto Vote Start** toggle replaces the manual start-vote button. It defaults off. When enabled, it sends a zero-argument `vote_start` request before the first match and after match resets, without requiring a loaded macro or Auto Replay.
+## Recording and playback
 
-It waits for the match flags, map readiness, and endpoint. It skips lobbies, running matches, and result screens. A sent vote is remembered for that waiting period, even if you change settings. Recorded start votes and Replay's start voting share the same tracking to avoid duplicates. Explicit rejections retry at three-second intervals, up to three automatic attempts; errors and unresolved calls are not spammed. **Stop everything** pauses it too. Save the toggle with **Save wave rules in this macro JSON**; old JSONs default it off.
+1. Enter a macro name. Set **Record start** to This match or Next match, then switch **Record ON**.
+2. Place, upgrade, sell, change priority, and use supported abilities/votes normally.
+3. Switch **Record OFF** to stop and save. Disabling before an armed recording starts cancels the wait without overwriting the file. Both operation toggles are disabled while saving.
+4. Select the recording and set **Play start** to Sync current match or Next match. Switch **Play ON**.
+5. Play automatically runs again at every new match while enabled. It stays on after completion or an early loss. **Play OFF** cancels the current operation and future repeats. There is no separate Repeat control. Failed starts or playback errors switch Play off.
 
-To automate a full cycle, enable **Play**, **Auto Replay at match end**, and **Auto Vote Start**. Play runs the macro each match, Auto Replay requests the next match, and Auto Vote Start votes when the new match is waiting to begin.
+Record and Play cannot run together. Rapid clicks do not create duplicate sessions. Unit references, full placement CFrames, and exact priority arguments are retained. Confirmation checks distinguish pending, confirmed/request-only, and rejected actions; unconfirmed attempts are skipped during playback. Movement and camera input are outside the action macro.
 
-Wave auto-upgrade and auto-sell
+## One JSON
 
-Open **Wave rules**. Both toggles are off by default. They apply to all placed units whose replicated ownership matches your player; other players' or unknown-owner models are skipped. Rules work during an active match with or without macro playback.
+Normal saves write only `AA_Macros/<name>.json` inside the executor workspace. That file contains the actions, timing samples, unit identities, and all saved settings. Save settings alone to create a profile without actions. No automatic draft, staging, backup, or playback-report file is written. Playback reports and unfinished recordings remain in memory.
 
-- **Enable auto upgrade:** begin at **Upgrade from wave**. **Upgrade through wave** sets an inclusive end (`0` means no end). **Target upgrade level** sets the desired level (`0` means Max).
-- Upgrades are spread across your units with one automatic request in flight at a time. Funds/readiness rejections back off and retry. A reported maximum stops retries for that level. Accepted upgrades must produce a level change; an unconfirmed result pauses upgrading that unit to prevent duplicates.
-- **Enable auto sell:** sell from **Sell from wave (inclusive)** onward. Late enabling after that wave also works. Newly placed owned units are sold while the rule remains enabled. Selling takes priority over upgrading.
-- During an active upgrade window, the rule manages upgrades in place of recorded upgrade actions. Earlier recorded upgrades still play before the rule's start wave. Once the sell wave is reached, future unit actions/placements in the macro are skipped so playback does not keep using or buying sold units.
-- **Save wave rules in this macro JSON** writes the settings into the same recording file. Without a recording, it creates a settings-only profile. Load applies its saved rules; enabled rules can begin immediately when their wave is already reached. Settings-only profiles run through the wave toggles, not the Play button.
-- **Pause wave rules** pauses automation. **Resume wave rules** resumes it. **Stop everything** also stops the macro. RPC timeouts pause automation while an unresolved request remains outstanding.
+Writes verify the file and can restore its previous contents from memory on a recoverable failure. Old helper files are removed only after validating the main JSON. **Remove old helper JSONs** retains orphan recovery files and manual diagnostics. If `makefolder` is unavailable, recordings use the `AA_Macro_` filename prefix instead.
 
-Example: upgrade from wave 3 to level 4, then sell from wave 15 onward. Set start `3`, target `4`, sell wave `15`, enable both toggles, then save. Keep stop wave `0` unless you want a specific upgrade end wave.
+**Save clock / unit diagnostics JSON** is an optional manual export of `<name>.diagnostics.json`. No recording, inventory, or diagnostics are uploaded to GitHub.
 
-Timing
+## Wave rules
 
-Adaptive stores each action's wave, replicated `_wave_time`, and an observed phase when available. Auto detects increasing/decreasing timers and plausible server timestamps. A paused replicated timer pauses actions. Early execution waits for map/endpoints readiness. Late execution can catch up in order and skip matching existing placements or completed upgrades.
+Auto-upgrade and auto-sell remain under **Wave rules** and apply to all units with confirmed ownership matching you.
 
-If a usable mid-wave timer is unavailable, Adaptive waits for an observed wave boundary. **Wave only** intentionally ignores within-wave time. **Offsets** uses elapsed time since playback starts; legacy v1 recordings use this mode because they have no wave samples. **Stop if late** rejects overdue actions. Positive timing adjustment delays within-wave actions; negative adjustment advances them.
+- Auto-upgrade supports a start wave, inclusive end wave (`0 = no end`), and target level (`0 = Max`). It spreads requests across units, backs off for funds/readiness, and stops repeatedly upgrading an unconfirmed or maxed unit.
+- Auto-sell applies from the chosen wave onward, including later placements. Selling takes priority over upgrading. Playback skips future unit actions in the sell phase.
+- During an active upgrade window, the rule manages matching upgrades instead of duplicating recorded calls. Automation and playback coordinate in-flight unit requests.
 
-The supplied place snapshot had zero wave/time values and lacked its main wave-service implementation. The live timer's meaning must therefore be detected or selected from diagnostics. Late catch-up cannot reproduce earlier combat, and server timing still depends on frames, replication, latency, funds, and cooldowns. Cobalt's logging timestamps are not used as the game clock.
+Both rules default off. Standalone Pause/Resume buttons are available. Saving stores their settings inside the same JSON.
 
-Repeat and diagnostics
+## Timing
 
-On the **Macro** tab, enable **Auto Replay at match end**. No learning step or loaded recording is required. It uses the built-in `set_game_finished_vote("replay")` request. The optional learned-argument override remains available if the game's request format differs.
+Defaults are **Adaptive / Catch up / Auto**. Each v2 action stores the wave, replicated timer, and observed phase when available. Timer direction and plausible server timestamps are detected. Paused timers pause actions; early playback waits for readiness. Catch-up preserves ordering and avoids matching existing placements or completed upgrades.
 
-- **Replay delay (seconds)** defaults to `2`. It can be changed from 0 to 60 seconds.
-- Leave **Play ON** to run the macro in every new match. Auto Replay can also run by itself with Play off; simply loading a file never launches a macro.
-- At a normal finish or early loss, pending future-wave playback is cancelled. A repeating macro waits for the next actual match reset instead of hanging on unreachable waves.
-- A sent vote is not repeated while waiting for the server or other players. Explicit rejections retry with spacing, up to three attempts by default. Errors and unresolved RPCs stop repeated voting; status is displayed in the panel.
-- **Auto-start replayed match** defaults on. After a reset, it sends a zero-argument start vote only if the game has not already started, its endpoint is ready, and the map is not a lobby. Disable it for manual starts.
-- **Stop everything** pauses replay and start voting too. Replay waits while a recording is active or a manual argument-learning session is pending.
-- **Save wave rules in this macro JSON** stores the Replay and Auto Vote Start settings with upgrade/sell settings. No additional JSON is created. Play itself starts only when you enable it.
+If the timer is unavailable mid-wave, Adaptive waits for an observed wave boundary. **Wave only** ignores within-wave time. **Offsets** uses elapsed time after playback starts and supports legacy v1 recordings. **Stop if late** rejects overdue actions. Positive timing adjustment delays actions; negative adjustment advances them within their wave.
 
-These controls operate within the current client/server session. A new Roblox client still requires running/loading MAA again; teleport reinjection is not installed. The built-in request has not been verified against your live server; use diagnostics and the optional override if the vote is rejected.
+Late injection cannot reproduce combat that already happened. Server execution still depends on frames, replication, latency, funds and cooldowns; exact server-side timing is not guaranteed.
 
-Playback reports remain in memory. **Save clock / unit diagnostics JSON** explicitly exports `<name>.diagnostics.json`, including the report, current clock samples, recent recording states, and ownership-field names. Use this only when troubleshooting; it is the only optional extra JSON. No diagnostics are uploaded.
+## Teleport resume
 
-The namecall recorder requires `hookmetamethod`, `getnamecallmethod`, `readfile`, `writefile`, and `loadstring` for the embedded UI. Separately cached native-method calls can bypass namecall capture. The hook only queues plain data and forwards the original request; processing runs outside it. Movement and camera input are outside this action macro.
+When an enabled session teleports, MAA queues the latest GitHub bundle through `queue_on_teleport` and restores settings plus enabled playback from an in-memory payload. No extra JSON is created. It loads the same named recording from executor storage. In a lobby, enabled playback waits for a match.
 
-The bundle compiles with official Luau 0.745 and passed 75 core scenarios plus 17 actual-MattLib integration checks in local engine doubles. It has not been verified in the live game or your executor. Start with a short recording and low-risk wave settings before using a full run.
+Map/account/place validation still applies. A recording for a different map must not be replayed blindly; a mismatch stops playback. A fresh Roblox process is separate from a teleport and still needs the loader. Executors without teleport queuing report that the loader must be rerun.
+
+## Verification
+
+The bundle compiles with official Luau 0.745, passes 109 local checks, and passes Real's static checker with zero errors/warnings. The actual UI loaded through Real, all eight Match controls rendered, and the live adapter read the connected match mode and level without errors. All automation was off during the live UI check. Story, tower, portal, leave and teleport requests were checked against live client handler code and local engine doubles; successful live server progression remains unverified.

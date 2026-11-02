@@ -2,7 +2,7 @@
 
 Roblox action macro with the bundled MattLib UI, JSON recordings, and wave-aware playback.
 
-Version 2.4 adds Auto Vote Start before the first match and after resets. Play now repeats automatically while its toggle stays on; the separate Repeat control is removed. Record OFF stops and saves, and Play OFF stops playback and future repeats. Auto Replay, one JSON per macro, and owned-unit wave rules remain available.
+Version 2.5 adds a Match tab with automatic start, wave skipping, Replay, next story/room/portal, and leaving after results. Teleports can restore enabled playback and settings. Record and Play remain toggles, Play repeats each match while enabled, and recordings/settings still share one JSON. Fast Forward is marked unavailable in the connected game build.
 
 ## Run the latest version
 
@@ -32,17 +32,17 @@ Use **Save wave rules in this macro JSON** to store the settings with the record
 
 Normal save/play creates only `<name>.json`. Drafts, staged copies, backups, and playback logs are no longer written automatically. Recovery-safe cleanup removes old helper files only when the main recording validates. Manual diagnostics export remains optional.
 
-## Auto Replay
+## Match controls
 
-On **Macro**, enable **Auto Replay at match end**. No learned button or loaded macro is required. The default delay is two seconds. Leave **Play ON** to run the macro in each new match; leave Play off for standalone replay voting. It handles early losses, waits for a real reset, and can send a start vote if the replayed match needs one. Already-sent votes are not spammed; explicit rejections have bounded retries. **Stop everything** pauses replay too. Save its settings with the other rules in the same JSON.
+Open **Match** for **Auto Start Game**, **Auto Skip Wave**, **Auto Replay**, **Auto Next Story**, **Auto Next Room**, **Auto Next Portal**, and **Auto Leave Match**. All default off. **Auto Fast Forward Speed** is displayed disabled because the connected build exposes no matching control/request.
 
-## Auto Vote Start
+At results, Leave takes priority, then the matching Next option, then Replay. Story and tower progression require victory; portal continuation requires a valid same-group inventory item and host ownership. A two-second result delay is adjustable. One result request is sent per end state, with bounded retries for explicit rejection. Stop everything pauses all automation. Save Match settings in the same macro JSON.
 
-The **Auto Vote Start** toggle replaces the manual start button. Enable it to vote before the first match and after resets. It waits for the map and match flags, skips lobbies and already-started games, and shares vote tracking with Replay and recorded start steps. Explicit rejections retry up to three times with three-second spacing. It defaults off and saves in the same macro JSON. **Stop everything** pauses it too.
+For a normal repeating cycle, enable **Play**, **Auto Start Game**, and **Auto Replay**. Play repeats automatically at each new match; Start Game is independent of Replay. No separate Repeat toggle is needed.
 
-For a full automatic cycle, enable **Play**, **Auto Replay at match end**, and **Auto Vote Start**. No separate Repeat toggle is needed.
+Teleport queuing restores settings and enabled playback using the latest GitHub bundle and the same named local recording. No extra JSON is written. Map/account/place validation still applies; a different map stops playback until an appropriate recording is selected.
 
-See [the usage guide](docs/USAGE.md) for timing, automatic playback, and compatibility limits. See [validation](docs/VALIDATION.md) for 75 core scenarios and 17 MattLib integration checks. These checks used local engine doubles; live-game/executor compatibility remains unverified.
+See [the usage guide](docs/USAGE.md) and [validation](docs/VALIDATION.md). There are 109 passing local checks and clean Real static checks. The actual UI and read-only game adapter were checked through Real with all automatic controls off. Successful live server progression remains unverified.
 
 ## Updating
 

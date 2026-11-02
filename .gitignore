@@ -1,0 +1,7 @@
+AA_Macros/
+AA_Macro_*.json
+*.draft.json
+*.backup.json
+*.staged.json
+*.last-playback.json
+*.diagnostics.json

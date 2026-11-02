@@ -2,7 +2,7 @@
 
 Roblox action macro with the bundled MattLib UI, JSON recordings, and wave-aware playback.
 
-Version 2.5 adds a Match tab with automatic start, wave skipping, Replay, next story/room/portal, and leaving after results. Teleports can restore enabled playback and settings. Record and Play remain toggles, Play repeats each match while enabled, and recordings/settings still share one JSON. Fast Forward is marked unavailable in the connected game build.
+Version 2.6 adds the requested Buffs tab: Damage, Range, Cooldown, Commander and Windsong controls, with formation-aware four-unit and five-unit sequences. Match automation, teleport resume, Record/Play toggles and single-JSON profiles remain available. Fast Forward is unavailable in the connected game build.
 
 ## Run the latest version
 
@@ -42,7 +42,15 @@ For a normal repeating cycle, enable **Play**, **Auto Start Game**, and **Auto R
 
 Teleport queuing restores settings and enabled playback using the latest GitHub bundle and the same named local recording. No extra JSON is written. Map/account/place validation still applies; a different map stops playback until an appropriate recording is selected.
 
-See [the usage guide](docs/USAGE.md) and [validation](docs/VALIDATION.md). There are 109 passing local checks and clean Real static checks. The actual UI and read-only game adapter were checked through Real with all automatic controls off. Successful live server progression remains unverified.
+## Buffs
+
+Open **Buffs** for the five requested toggles and Commander/Windsong statuses. All controls default off. Basic upkeep handles supported active buffs; Kisuke's Range and attack-SPA controls share one cast. Passive auras are excluded.
+
+Place your units and choose Auto, Four-unit relay or Five-unit pentagon. Auto validates the layout, while the scheduler uses received-buff expiry, replicated cast confirmation and actual cooldown readiness. Commander/Windsong run separate sequences and override basic damage upkeep for their family. Unsupported layouts wait for setup. The researched six-unit double line is not implemented.
+
+Save Buffs settings in the same macro JSON. Stop everything pauses the automation. Status reports observed support-unit buff strength; a valid formation does not guarantee full-team coverage or a sustained 100% loop. See [the research notes](docs/BUFF_COMBO_RESEARCH.md).
+
+See [the usage guide](docs/USAGE.md) and [validation](docs/VALIDATION.md). There are 129 passing local checks and clean Real static checks. The actual six-tab UI and read-only game adapter were checked through Real with all automatic controls off. Successful live server progression and live buff combos remain unverified.
 
 ## Updating
 

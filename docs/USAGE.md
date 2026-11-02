@@ -1,4 +1,4 @@
-# MAA 2.5
+# MAA 2.6
 
 Run the same GitHub loader to receive the latest version:
 
@@ -6,7 +6,7 @@ Run the same GitHub loader to receive the latest version:
 loadstring(game:HttpGet("https://raw.githubusercontent.com/Cybersize/MAA/main/loader.lua"))()
 ```
 
-The panel should show **MAA 2.5**. MattLib 1.2.1 remains embedded. Right Ctrl hides/shows the window. Choose a design in Diagnostics.
+The panel should show **MAA 2.6**. MattLib 1.2.1 remains embedded. Right Ctrl hides/shows the window. Choose a design in Diagnostics.
 
 ## Match controls
 
@@ -29,7 +29,29 @@ Accepted/unknown-successful result votes are remembered until an actual reset, i
 
 Start Game is independent of Replay. There is no second replay-specific start toggle. To automate a normal repeat cycle, enable **Play**, **Auto Start Game**, and **Auto Replay**. Add Auto Skip Wave if wanted. Enable the relevant Next control for progression. Auto Leave overrides the other result controls.
 
-**Stop everything** pauses Match automation, playback, and wave rules. **Resume match automation** resumes enabled automatic controls. Save with **Save Match settings in this macro JSON** or the existing wave-rule save button.
+**Stop everything** pauses Match automation, Buffs, playback, and wave rules. **Resume match automation** resumes enabled automatic controls. Save with **Save Match settings in this macro JSON** or the existing wave-rule save button.
+
+## Buffs
+
+The **Buffs** tab adds the five controls from your screenshot. All default off and apply only to your confirmed-owned support units.
+
+| Control | Behavior |
+| --- | --- |
+| Auto Damage Buff | Basic upkeep for supported active damage buffs. Avoids another nearby same-family cast while its effect is still within its duration. |
+| Auto Range Buff | Uses supported active range buffs. Evolved Kisuke unlocks his at upgrade 6. |
+| Auto Cooldown Buff | Uses supported attack-SPA reduction buffs. Kisuke's range and SPA effects share one request when both controls are on. This does not reduce active-ability cooldowns. |
+| Auto Commander | Runs the selected formation-checked Erwin sequence instead of basic damage upkeep for that family. |
+| Auto Windsong | Runs an independent Wendy sequence with the same placement/readiness checks. |
+
+Place your support units yourself, then choose **Auto**, **Four-unit relay**, or **Five-unit pentagon**. Auto looks for a valid five-unit ring first, then a four-unit mutually covering layout. The ring rejects coverage of opposite supports, including one-way coverage caused by unequal ranges. Missing, sold, moved, or differently upgraded units trigger a new formation check. Unsupported layouts show **Setup required** and wait. The researched six-unit double-line method is not implemented.
+
+Combo steps use received-buff expiry, current per-unit cooldowns, global readiness, and replicated cast confirmation. Commander and Windsong track separate sequences. The relay's initial stagger adapts to the observed cooldown; the ring spaces casts using the current cooldown. These schedules are experimental: the current server's complete transfer-strength formula and curse behavior have not been verified by live casts. A valid layout alone does not guarantee a sustained 100% loop.
+
+The status reports the maximum buff **observed on the support units**. It does not certify every damage unit's coverage, uninterrupted uptime, or future server acceptance. Damage-stack strength and uptime are separate measurements. Passive auras such as Idol (Star) are excluded from active requests.
+
+When a specialized family is enabled, basic damage upkeep leaves its sequence alone. Matching recorded active calls defer to enabled Buffs automation. Unit requests coordinate with playback and wave rules; selling takes priority. An unresolved request is never duplicated, and an unconfirmed cast pauses that unit until a new observed cast or an explicit settings reset. Explicit rejections back off and stop after three attempts.
+
+Use **Save Buffs settings in this macro JSON** to store the controls in the same profile. **Stop everything** pauses Buffs too; **Resume buff automation** resumes enabled controls. Teleport resume includes Buffs settings without creating another JSON. See [the research notes](BUFF_COMBO_RESEARCH.md) for current-client evidence, historical sources, and remaining unknowns.
 
 ## Recording and playback
 
@@ -75,4 +97,4 @@ Map/account/place validation still applies. A recording for a different map must
 
 ## Verification
 
-The bundle compiles with official Luau 0.745, passes 109 local checks, and passes Real's static checker with zero errors/warnings. The actual UI loaded through Real, all eight Match controls rendered, and the live adapter read the connected match mode and level without errors. All automation was off during the live UI check. Story, tower, portal, leave and teleport requests were checked against live client handler code and local engine doubles; successful live server progression remains unverified.
+The bundle compiles with official Luau 0.745, passes 129 local checks, and passes Real's static checker with zero errors/warnings. The actual six-tab UI loaded through Real and the adapter read the connected match mode and level without errors. All automation was off during live smoke checks. No owned support units were placed, so live support casts and a sustained 100% buff loop remain unverified. See [validation](VALIDATION.md) for the distinction between simulated behavior and live evidence.

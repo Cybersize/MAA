@@ -3899,7 +3899,7 @@ end
 return __require("init")
 
 ]====]
--- MAA v2.5 -- Match controls, automatic continuation and teleport resume.
+-- MAA v2.6 -- Buff upkeep and state-aware Commander/Windsong combo patterns.
 local Resume=...
 -- MattLib 1.2.1 is embedded, pinned and MIT licensed. No runtime downloads.
 -- Records request timestamps, not guaranteed server execution timestamps.
@@ -3946,6 +3946,7 @@ local function normalizeWaveRules(rules)
     local replay=part(rules.replay,"Replay rule")
     local start=part(rules.start,"Start-vote rule")
     local m=part(rules.match,"Match rules")
+    local b=part(rules.buffs,"Buff rules")
     local function enabled(value)
         check(value==nil or type(value)=="boolean","Rule enabled must be true or false")
         return value==true
@@ -3964,6 +3965,8 @@ local function normalizeWaveRules(rules)
         stopWave=integer(u.stopWave,0,"Upgrade stop wave"),targetLevel=integer(u.targetLevel,0,"Target upgrade")},
         sell={enabled=enabled(s.enabled),wave=integer(s.wave,20,"Sell wave")},
         start={enabled=enabled(start.enabled)},
+        buffs={damage=enabled(b.damage),range=enabled(b.range),cooldown=enabled(b.cooldown),
+            commander=enabled(b.commander),windsong=enabled(b.windsong),pattern=b.pattern or "Auto"},
         match={skipWave=enabled(m.skipWave),nextStory=enabled(m.nextStory),nextRoom=enabled(m.nextRoom),
             nextPortal=enabled(m.nextPortal),leave=enabled(m.leave),fastForward=enabled(m.fastForward)},
         replay={enabled=enabled(replay.enabled),repeatMacro=enabled(replay.repeatMacro),
@@ -3972,6 +3975,7 @@ local function normalizeWaveRules(rules)
             maxAttempts=integer(replay.maxAttempts,3,"Replay attempts")}}
     check(result.replay.maxAttempts>=1 and result.replay.maxAttempts<=10,"Replay attempts must be 1-10")
     check(result.replay.retryDelay>=1,"Replay retry delay must be at least one second")
+    check(result.buffs.pattern=="Auto" or result.buffs.pattern=="Four-unit relay" or result.buffs.pattern=="Five-unit pentagon","Invalid buff combo pattern")
     check(result.upgrade.stopWave==0 or result.upgrade.stopWave>=result.upgrade.startWave,
         "Upgrade stop wave must be zero or at least the start wave")
     return result
@@ -4507,7 +4511,7 @@ function API:Save(name)
     check(self.mode~="recording" and self.mode~="record_armed","Stop recording before saving")
     check(self.document~=nil,"There is no recording to save")
     self.document.autoRules=normalizeWaveRules(self.autoRules)
-    self.document.appVersion="2.5.0"
+    self.document.appVersion="2.6.0"
     local doc=validate(self.document)
     local path=filePath(name)
     local text=Http:JSONEncode(doc)
@@ -4969,7 +4973,7 @@ local function performEntry(ctx,entry,late)
     if token and ctx.pruned[token] then auditFinish(ctx,entry,row,"skipped","unit was already sold in the overdue part of the recording"); return end
     local deadline = os.clock()+(Options.ReadyTimeout or 45)
     while active(ctx) do
-        local managed=API:_WaveRuleOwns(entry)
+        local managed=API:_WaveRuleOwns(entry) or API:_BuffRuleOwns(entry,ctx)
         if managed then
             auditFinish(ctx,entry,row,"skipped",managed); return
         end
@@ -5064,7 +5068,7 @@ local function playTick(ctx,now)
     if ctx.requestAt and not ctx.requestDone then
         check(now-ctx.requestAt <= (Options.CallTimeout or 8),"Server request timed out; playback stopped")
     end
-    if ctx.busy or (API.autoRuntime and API.autoRuntime.call) or now < (ctx.nextSend or 0) then return end
+    if ctx.busy or (API.autoRuntime and API.autoRuntime.call) or (API.buffRuntime and API.buffRuntime.call) or now < (ctx.nextSend or 0) then return end
     local entry = ctx.doc.actions[ctx.index]
     if not entry then
         if ctx.timingMode == "Offsets" and now-ctx.start < ctx.doc.duration then return end
@@ -5127,7 +5131,7 @@ end
 function API:SetWaveRules(patch)
     check(type(patch)=="table","Wave-rule patch must be a table")
     local merged=normalizeWaveRules(self.autoRules)
-    for _,kind in ipairs({"upgrade","sell","replay","start","match"}) do
+    for _,kind in ipairs({"upgrade","sell","replay","start","match","buffs"}) do
         if patch[kind]~=nil then
             check(type(patch[kind])=="table","Invalid " .. kind .. " settings")
             for key,value in pairs(patch[kind]) do merged[kind][key]=value end
@@ -5216,6 +5220,7 @@ end
 
 local function automationTick(now)
     local r,s=API.autoRuntime,Clock.sample
+    if API.buffRuntime and API.buffRuntime.call then return end
     if r.call then
         if not r.call.returned and now-r.call.started>(Options.CallTimeout or 8) then
             r.paused=true
@@ -5667,6 +5672,271 @@ local function replayTick(now)
 end
 
 
+API.buffRuntime={status="Buff automation is off",commander="Standby",windsong="Standby",plans={},perUnit={},nextAt=0,serial=0}
+local buffBridge,buffBridgeRetry=nil,0
+local function buffNow() return type(tick)=="function" and tick() or os.clock() end
+local function buffServices()
+    if buffBridge then return buffBridge end
+    if os.clock()<buffBridgeRetry then return nil end
+    buffBridgeRetry=os.clock()+2
+    local ok,b=pcall(function()
+        local src=RS:FindFirstChild("src"); local module=src and src:FindFirstChild("Loader")
+        if not module then return nil end
+        local L=require(module)
+        return {attacks=L.load_data(nil,"Attacks"),replicate=L.load_client_service(nil,"AttacksReplicate"),
+            collection=game:GetService("CollectionService")}
+    end)
+    if ok then buffBridge=b else API.buffRuntime.status="Waiting for buff services: " .. tostring(b) end
+    return buffBridge
+end
+local function buffEnabled(row)
+    local c=API.autoRules.buffs
+    if row.family=="erwin" and c.commander then return true end
+    if row.family=="wendy" and c.windsong then return true end
+    return c.damage and row.damage or c.range and row.range or c.cooldown and row.cooldown
+end
+local function buffRows()
+    if type(Options.BuffSnapshot)=="function" then return Options.BuffSnapshot() end
+    local b=buffServices(); if not b then return {} end
+    local rows={}; local folder=unitsFolder()
+    for _,model in ipairs(folder and folder:GetChildren() or {}) do
+        if model:IsA("Model") and owned(model)==true and not b.collection:HasTag(model,"dying_units") then
+            local active=stat(model,"active_attack")
+            local definition=type(active)=="string" and b.attacks[active]
+            if definition and definition._active_attack and not definition.custom_client_script then
+                local row={model=model,active=active,unitId=tostring(stat(model,"id")),duration=0,
+                    position=vec(unitPosition(model)),radius=tonumber(stat(model,"range")),last=tonumber(stat(model,"last_active_cast")),
+                    power=0}
+                for _,area in pairs(definition.aoe or {}) do
+                    if area.hit_allies=="allies" then
+                        for _,effect in pairs(area.hit and area.hit.buffs or {}) do
+                            local name=tostring(effect.name)
+                            if name=="damage_buff__physical" or name=="damage_buff__magic" then row.damage=true end
+                            if name=="range_buff" then row.range=true end
+                            if name=="attack_cooldown_buff" then row.cooldown=true end
+                            if finite(effect.time) then row.duration=math.max(row.duration,effect.time) end
+                        end
+                    end
+                end
+                if active=="erwin:buff_units" then row.family="erwin"
+                elseif active=="wendy:buff_units" then row.family="wendy" else row.family=active end
+                local stats=model:FindFirstChild("_stats")
+                local power=stats and stats:GetAttribute(row.family=="erwin" and "_dmg_buff_physical" or "_dmg_buff_magic")
+                row.power=finite(power) and math.max(0,power) or 0
+                local effects=model:FindFirstChild("_buffs")
+                local effect=effects and effects:FindFirstChild(row.family=="erwin" and "damage_buff__physical" or "damage_buff__magic")
+                if effect and effect:IsA("ValueBase") and finite(effect.Value) then row.buffActive=effect.Value>0
+                else row.buffActive=row.power>0 end
+                local ok,busy,ready,cooldown,remaining=pcall(b.replicate.get_current_active_attack_cooldown,model,active)
+                row.ready=ok and not busy and ready==true
+                row.cooldownSeconds=tonumber(stat(model,"active_attack_cooldown")) or cooldown
+                row.remaining=remaining
+                if (row.damage or row.range or row.cooldown) and finite(row.last) and row.duration>0 then rows[#rows+1]=row end
+            end
+        end
+    end
+    return rows
+end
+local function reaches(a,b)
+    if not a.position or not b.position or not finite(a.radius) or a.radius<=0 then return false end
+    local dx,dz=a.position[1]-b.position[1],a.position[3]-b.position[3]
+    return dx*dx+dz*dz<=(a.radius-0.1)^2
+end
+local function hasReceivedBuff(row)
+    if type(row.buffActive)=="boolean" then return row.buffActive end
+    return (row.power or 0)>0
+end
+local function formation(rows,kind)
+    local n=kind=="relay" and 4 or 5
+    if #rows<n then return nil end
+    -- Spawn caps keep this bounded: examine subsets of at most six support units.
+    local chosen,result={},nil
+    local function validate()
+        if kind=="relay" then
+            for i=1,n do for j=1,n do if i~=j and not reaches(chosen[i],chosen[j]) then return end end end
+            result={}; for i=1,n do result[i]=chosen[i] end
+        else
+            local neighbors={}
+            for i=1,n do
+                neighbors[i]={}
+                for j=1,n do
+                    if i~=j and reaches(chosen[i],chosen[j]) then
+                        if not reaches(chosen[j],chosen[i]) then return end
+                        neighbors[i][#neighbors[i]+1]=j
+                    end
+                end
+                if #neighbors[i]~=2 then return end
+            end
+            local order,used={1},{[1]=true}
+            for i=2,n do
+                local nextIndex
+                for _,j in ipairs(neighbors[order[i-1]]) do if not used[j] then nextIndex=j; break end end
+                if not nextIndex then return end
+                order[i]=nextIndex; used[nextIndex]=true
+            end
+            if not reaches(chosen[order[n]],chosen[1]) then return end
+            result={}; for i,j in ipairs(order) do result[i]=chosen[j] end
+        end
+    end
+    local function pick(start)
+        if result then return end
+        if #chosen==n then validate(); return end
+        for i=start,math.min(#rows,6) do chosen[#chosen+1]=rows[i]; pick(i+1); chosen[#chosen]=nil; if result then return end end
+    end
+    pick(1)
+    return result
+end
+local function comboChoice(family,rows,now)
+    local r,c=API.buffRuntime,API.autoRules.buffs
+    local key=family=="erwin" and "commander" or "windsong"
+    if not c[key] then r[key]="Standby"; r.plans[family]=nil; return nil end
+    if #rows==0 then r[key]="Standby — no owned unit placed"; r.plans[family]=nil; return nil end
+    table.sort(rows,function(a,b) return a.serial<b.serial end)
+    local parts={c.pattern}
+    for _,row in ipairs(rows) do
+        parts[#parts+1]=string.format("%d:%.1f:%.1f:%.1f",row.serial,row.position and row.position[1] or 0,
+            row.position and row.position[3] or 0,row.radius or 0)
+    end
+    local signature=table.concat(parts,"|")
+    local p=r.plans[family]
+    if not p or p.signature~=signature then
+        local order,kind
+        if c.pattern~="Four-unit relay" then order=formation(rows,"pentagon"); if order then kind="pentagon" end end
+        if not order and c.pattern~="Five-unit pentagon" then order=formation(rows,"relay"); if order then kind="relay" end end
+        p={signature=signature,order=order,kind=kind,index=1,due=0}; r.plans[family]=p
+    end
+    if not p.order then r[key]="Setup required — four mutually covering units or a five-unit ring"; return nil end
+    -- Refresh the rows while preserving the chosen model identities.
+    local byModel={}; for _,row in ipairs(rows) do byModel[row.model]=row end
+    for i,row in ipairs(p.order) do p.order[i]=byModel[row.model] or row end
+    local row=p.order[p.index]
+    local top=0; for _,v in ipairs(rows) do top=math.max(top,v.power or 0) end
+    local label=p.kind=="relay" and "4-unit relay" or "5-unit pentagon"
+    r[key]=string.format("%s · step %d/%d · observed max %.0f%%",label,p.index,#p.order,top*100)
+    if now<p.due then return nil end
+    if not row.ready then r[key]=r[key] .. " · waiting for cooldown"; return nil end
+    if p.kind=="relay" then
+        local a,b=p.order[1],p.order[2]
+        local maxCooldown=0
+        for _,v in ipairs(p.order) do maxCooldown=math.max(maxCooldown,v.cooldownSeconds or math.huge) end
+        local gap=math.max(3,maxCooldown-2*row.duration+1)
+        if gap>=row.duration then r[key]="Setup timing cannot sustain a four-unit relay"; return nil end
+        p.gap=gap
+        if p.index==2 and (not hasReceivedBuff(row) or hasReceivedBuff(a)) then return nil end
+        if p.index==3 and hasReceivedBuff(b) then return nil end
+        if p.index==4 and (hasReceivedBuff(a) or not hasReceivedBuff(row)) then return nil end
+        if p.index==1 and p.cycled and hasReceivedBuff(b) then return nil end
+    elseif p.index~=1 and not hasReceivedBuff(row) then
+        r[key]=r[key] .. " · waiting for a transferred buff"; return nil
+    end
+    return row,p
+end
+local function performBuff(call)
+    local r=API.buffRuntime
+    if not API.alive or API.autoRuntime.paused or not buffEnabled(call.row) or owned(call.row.model)~=true
+        or unitModel(call.row.model)~=call.row.model or flag("GameStarted")~=true or flag("GameFinished")==true then return end
+    local before=call.row.last
+    local result=pack(pcall(function() return checkRemote("use_active_attack","InvokeServer"):InvokeServer(call.row.model) end))
+    call.returned=true
+    if not API.alive then return end
+    local state=r.perUnit[call.row.model]
+    if not state then return end
+    if not result[1] then state.blocked=true; r.status="Buff request error: " .. tostring(result[2]); return end
+    if isRejected(result) then
+        state.failures=(state.failures or 0)+1
+        state.nextAt=os.clock()+math.min(8,2^state.failures)
+        if state.failures>=3 then state.blocked=true end
+        r.status="Buff rejected; waiting for readiness"; return
+    end
+    local deadline=os.clock()+(Options.ConfirmTimeout or 8)
+    local observed
+    repeat
+        for _,row in ipairs(buffRows()) do if row.model==call.row.model and row.last>before then observed=row; break end end
+        if observed then break end
+        if not API.alive or API.autoRuntime.paused or not buffEnabled(call.row) or unitModel(call.row.model)~=call.row.model
+            or flag("GameStarted")~=true or flag("GameFinished")==true then return end
+        task.wait(0.05)
+    until os.clock()>=deadline
+    if not observed then state.blocked=true; r.status="Buff cast unconfirmed; this unit is paused"; return end
+    state.failures,state.nextAt=0,os.clock()+0.5
+    state.observedLast=observed.last
+    if call.plan and r.plans[call.row.family]==call.plan then
+        local p=call.plan
+        if p.kind=="relay" then p.due=buffNow()+(p.index==1 and p.gap or 0)
+        else p.due=buffNow()+(observed.cooldownSeconds or 60)/5 end
+        p.index=p.index%#p.order+1
+        if p.index==1 then p.cycled=true end
+    end
+    r.status="Cast confirmed: " .. tostring(call.row.active)
+end
+function API:SetBuffRule(key,value)
+    check(key=="damage" or key=="range" or key=="cooldown" or key=="commander" or key=="windsong" or key=="pattern","Unknown buff setting")
+    self:SetWaveRules({buffs={[key]=value}})
+    self.buffRuntime.plans={}
+    for _,s in pairs(self.buffRuntime.perUnit) do if not self.buffRuntime.call then s.blocked=false; s.failures=0 end end
+end
+function API:_BuffRuleOwns(entry,ctx)
+    if entry.remote~="use_active_attack" or self.autoRuntime.paused then return nil end
+    local token=entryUnit(entry); local model=token and matchExisting(ctx,token)
+    if not model then return nil end
+    for _,row in ipairs(buffRows()) do if row.model==model and buffEnabled(row) then return "managed by Buffs automation" end end
+    return nil
+end
+local function buffTick(now)
+    local r,c=API.buffRuntime,API.autoRules.buffs
+    if r.call then
+        if not r.call.returned and now-r.call.started>(Options.CallTimeout or 8) then r.status="Buff request timed out; waiting for its result" end
+        return
+    end
+    if API.autoRuntime.paused then r.status="Buff automation paused"; return end
+    if not c.damage and not c.range and not c.cooldown and not c.commander and not c.windsong then
+        r.status,r.commander,r.windsong="Buff automation is off","Standby","Standby"; return
+    end
+    if flag("GameStarted")~=true or flag("GameFinished")==true then
+        r.plans={}; r.status="Waiting for a match"; return
+    end
+    if now<r.nextAt or API.mode=="finalizing" or API.autoRuntime.call or sellRuleDue() then return end
+    local ctx=API.context
+    if API.mode=="playing" and ctx and ctx.busy then return end
+    r.nextAt=now+0.2
+    local rows=buffRows(); local families={erwin={},wendy={}}; local live={}
+    for _,row in ipairs(rows) do
+        live[row.model]=true
+        local state=r.perUnit[row.model]
+        if not state then r.serial=r.serial+1; state={serial=r.serial,nextAt=0}; r.perUnit[row.model]=state end
+        row.serial=state.serial
+        if state.blocked and state.blockedAt and row.last>state.blockedAt then state.blocked=false end
+        row.ready=row.ready and not state.blocked and now>=(state.nextAt or 0)
+        if families[row.family] then families[row.family][#families[row.family]+1]=row end
+    end
+    for model in pairs(r.perUnit) do if not live[model] then r.perUnit[model]=nil end end
+    local chosen,plan
+    for _,family in ipairs({"erwin","wendy"}) do
+        local candidate,p=comboChoice(family,families[family],buffNow())
+        if candidate and not chosen then chosen,plan=candidate,p end
+    end
+    if not chosen then
+        for _,row in ipairs(rows) do
+            local specialized=row.family=="erwin" and c.commander or row.family=="wendy" and c.windsong
+            if row.ready and buffEnabled(row) and not specialized then
+                local covered=false
+                for _,peer in ipairs(rows) do
+                    if peer.family==row.family and buffNow()-peer.last<peer.duration and (peer.model==row.model or reaches(peer,row)) then covered=true; break end
+                end
+                if not covered then chosen=row; break end
+            end
+        end
+    end
+    if not chosen then r.status=#rows==0 and "Standby — no supported owned buff units" or "Waiting for cooldowns, buff expiry or combo setup"; return end
+    local state=r.perUnit[chosen.model]; state.blockedAt=chosen.last
+    local call={row=chosen,plan=plan,started=now}; r.call=call
+    task.spawn(function()
+        local ok,err=pcall(performBuff,call)
+        if r.call==call then r.call=nil end
+        if not ok then state.blocked=true; r.status="Buff automation error: " .. tostring(err) end
+    end)
+end
+
 local prevStarted,prevFinished,prevWave=flag("GameStarted"),flag("GameFinished"),workspaceNumber("_wave_num")
 local lastUI=0
 local function tick()
@@ -5698,6 +5968,7 @@ local function tick()
         end
     elseif API.mode=="playing" then playTick(API.context,now) end
     automationTick(now)
+    buffTick(now)
 
     if API.updateUI and now-lastUI>0.25 then
         lastUI=now
@@ -5718,6 +5989,7 @@ function API:SaveDiagnostics()
         replayStatus=self.replayRuntime.status,replayAttempts=self.replayRuntime.attempts,
         startVoteStatus=self.replayRuntime.startStatus,startVoteAttempts=self.replayRuntime.startAttempts,
         skipVoteStatus=self.matchRuntime.skipStatus,matchContextError=self.matchRuntime.contextError,
+        buffStatus=self.buffRuntime.status,commanderStatus=self.buffRuntime.commander,windsongStatus=self.buffRuntime.windsong,
         playback=self.context and not self.context.recording and self.context.audit or nil,
         activeRequest=self.context and self.context.activeAudit or nil,uiError=self.uiError}
     local actions=self.document and self.document.actions or {}
@@ -5778,6 +6050,8 @@ pcall(function()
         local m=API.autoRules.match
         local active=API.mode~="idle" or API.autoReplay or API.autoRules.start.enabled
             or m.skipWave or m.nextStory or m.nextRoom or m.nextPortal or m.leave
+            or API.autoRules.buffs.damage or API.autoRules.buffs.range or API.autoRules.buffs.cooldown
+            or API.autoRules.buffs.commander or API.autoRules.buffs.windsong
         if not active then return end
         if type(queueTeleport)~="function" then
             notify("Teleport resume is unavailable in this executor; rerun the loader after joining")
@@ -5819,7 +6093,7 @@ if Options.ShowUI~=false then
     local app=MattLib.new({id="aa-macro-v2",design="Vector",wallpaperAssets=false,capabilities={},
         onError=function(message) notify("UI: " .. tostring(message)) end})
     API.uiApp=app
-    local window=app:CreateWindow({Id="macro",Title="MAA 2.5",Design="Vector",Size={800,620},
+    local window=app:CreateWindow({Id="macro",Title="MAA 2.6",Design="Vector",Size={800,620},
         MinSize={520,400},OpenKey="RightControl",OnClose=function() API:Shutdown() end})
     API.uiWindow=window
     local function try(fn)
@@ -5983,6 +6257,38 @@ if Options.ShowUI~=false then
         Callback=function(value) Options.ReadyTimeout=value end})
     sync:AddParagraph({Content="Adaptive uses the replicated wave timer when available. It can catch up late actions in order and wait for rejected unit actions to become ready. If no trustworthy time is available, it waits for a wave boundary. Wave only deliberately ignores within-wave time."})
     local clockLabel=sync:AddParagraph({Content="Reading the game clock..."})
+    local buffsTab=window:AddTab({Title="Buffs",Icon="activity",Columns=2,MinColumnWidth=260,Gap=12})
+    local buffSection=buffsTab:AddSection({Title="BUFFS"})
+    local buffControls={}
+    local function setBuff(key,value)
+        if not API.syncingBuffUI then try(function() API:SetBuffRule(key,value) end) end
+    end
+    for _,pair in ipairs({{"damage","Auto Damage Buff"},{"range","Auto Range Buff"},{"cooldown","Auto Cooldown Buff"}}) do
+        local key,title=pair[1],pair[2]
+        buffControls[key]=buffSection:AddToggle({Title=title,Default=API.autoRules.buffs[key],Callback=function(value) setBuff(key,value) end})
+    end
+    buffControls.commander=buffSection:AddToggle({Title="Auto Commander",Default=API.autoRules.buffs.commander,Callback=function(value) setBuff("commander",value) end})
+    local commanderStatus=buffSection:AddParagraph({Content="Commander (Erwin): Standby"})
+    buffControls.windsong=buffSection:AddToggle({Title="Auto Windsong",Default=API.autoRules.buffs.windsong,Callback=function(value) setBuff("windsong",value) end})
+    local windsongStatus=buffSection:AddParagraph({Content="Windsong (Wendy): Standby"})
+    local buffSetup=buffsTab:AddSection({Title="Combo setup & status"})
+    local buffPattern=buffSetup:AddDropdown({Title="Commander / Windsong pattern",Options={"Auto","Four-unit relay","Five-unit pentagon"},
+        Default=API.autoRules.buffs.pattern,Callback=function(value) setBuff("pattern",value) end})
+    buffSetup:AddParagraph({Content="Auto validates a five-unit ring first, then four mutually covering units. Place the units yourself. The relay follows received-buff expiry and observed casts; the ring follows its ordered cycle and real cooldowns. Status reports observed buff strength. A 100% stack is separate from uninterrupted uptime. Unsupported layouts wait for setup."})
+    buffSetup:AddParagraph({Content="Damage uses basic buff upkeep unless its Commander/Windsong combo is enabled. Kisuke's range and attack-SPA buffs share one cast; they unlock at upgrade 6. The active ability cooldown changes with later upgrades. Passive auras such as Idol (Star) need no active request."})
+    buffSetup:AddButton({Title="Save Buffs settings in this macro JSON",Callback=function() try(function() API:SaveWaveRules(name:GetValue()) end) end})
+    buffSetup:AddButton({Title="Resume buff automation",Callback=function() API:PauseWaveRules(false) end})
+    local buffStatus=buffSetup:AddParagraph({Content="Buff automation is off"})
+    local function syncBuffUI()
+        API.syncingBuffUI=true
+        for key,control in pairs(buffControls) do if control:GetValue()~=API.autoRules.buffs[key] then control:SetValue(API.autoRules.buffs[key]) end end
+        if buffPattern:GetValue()~=API.autoRules.buffs.pattern then buffPattern:SetValue(API.autoRules.buffs.pattern) end
+        API.syncingBuffUI=false
+        commanderStatus:Update({Content="Commander (Erwin): " .. API.buffRuntime.commander})
+        windsongStatus:Update({Content="Windsong (Wendy): " .. API.buffRuntime.windsong})
+        buffStatus:Update({Content=API.buffRuntime.status})
+    end
+
     local automation=window:AddTab({Title="Wave rules",Icon="controls",Columns=2,MinColumnWidth=260,Gap=12})
     local up=automation:AddSection({Title="Auto upgrade",Description="Applies to all your placed units."})
     local u,s=API.autoRules.upgrade,API.autoRules.sell
@@ -6022,6 +6328,7 @@ if Options.ShowUI~=false then
     API.updateUI=function()
         syncActions()
         syncMatchUI()
+        syncBuffUI()
         local c,ctx=API:Counts(),API.context
         local count=API.document and #API.document.actions or 0
         local text=string.format("%s\n%d recorded  |  %d pending  |  %d unconfirmed\n%s",API.mode,c.successful,c.pending,c.failed,API.message)
@@ -6045,5 +6352,5 @@ if Options.ShowUI~=false then
     end
     API.updateUI()
 end
-notify("MAA 2.5 ready: configure the Match tab for start, skip and continuation.")
+notify("MAA 2.6 ready: Buffs includes upkeep and formation-aware combo modes.")
 return API

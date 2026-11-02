@@ -3899,7 +3899,7 @@ end
 return __require("init")
 
 ]====]
--- MAA v2.3 -- state-aware Record/Play toggles, Auto Replay and wave rules.
+-- MAA v2.4 -- Auto Vote Start, Record/Play toggles, Auto Replay and wave rules.
 -- MattLib 1.2.1 is embedded, pinned and MIT licensed. No runtime downloads.
 -- Records request timestamps, not guaranteed server execution timestamps.
 local ENV = getgenv and getgenv() or _G
@@ -3943,6 +3943,7 @@ local function normalizeWaveRules(rules)
     end
     local u,s=part(rules.upgrade,"Upgrade rule"),part(rules.sell,"Sell rule")
     local replay=part(rules.replay,"Replay rule")
+    local start=part(rules.start,"Start-vote rule")
     local function enabled(value)
         check(value==nil or type(value)=="boolean","Rule enabled must be true or false")
         return value==true
@@ -3960,6 +3961,7 @@ local function normalizeWaveRules(rules)
     local result={upgrade={enabled=enabled(u.enabled),startWave=integer(u.startWave,1,"Upgrade start wave"),
         stopWave=integer(u.stopWave,0,"Upgrade stop wave"),targetLevel=integer(u.targetLevel,0,"Target upgrade")},
         sell={enabled=enabled(s.enabled),wave=integer(s.wave,20,"Sell wave")},
+        start={enabled=enabled(start.enabled)},
         replay={enabled=enabled(replay.enabled),repeatMacro=enabled(replay.repeatMacro),
             autoStart=replay.autoStart==nil and true or enabled(replay.autoStart),
             delay=seconds(replay.delay,2,"Replay delay"),retryDelay=seconds(replay.retryDelay,3,"Replay retry delay"),
@@ -4501,7 +4503,7 @@ function API:Save(name)
     check(self.mode~="recording" and self.mode~="record_armed","Stop recording before saving")
     check(self.document~=nil,"There is no recording to save")
     self.document.autoRules=normalizeWaveRules(self.autoRules)
-    self.document.appVersion="2.3.0"
+    self.document.appVersion="2.4.0"
     local doc=validate(self.document)
     local path=filePath(name)
     local text=Http:JSONEncode(doc)
@@ -4543,7 +4545,7 @@ function API:Load(name)
     name = name or self.name
     local doc = validate(Http:JSONDecode(readfile(filePath(name))))
     self.document, self.name = doc, name
-    self:SetWaveRules(doc.autoRules or {})
+    self:SetWaveRules(normalizeWaveRules(doc.autoRules))
     notify("Loaded " .. #doc.actions .. " actions: " .. name)
     return doc
 end
@@ -4951,6 +4953,9 @@ end
 local function performEntry(ctx,entry,late)
     local row = {seq=entry.seq,remote=entry.remote,scheduled=entry.t,sync=entry.sync,attempts={},late=late == math.huge and "past wave" or late}
     ctx.activeAudit=row
+    if entry.remote=="vote_start" and API:_StartVoteManaged() then
+        auditFinish(ctx,entry,row,"skipped","match started or start vote already sent"); return
+    end
     local token = entryUnit(entry)
     if token and ctx.autoSold[token] then auditFinish(ctx,entry,row,"skipped","unit was auto-sold"); return end
     if token and ctx.pruned[token] then auditFinish(ctx,entry,row,"skipped","unit was already sold in the overdue part of the recording"); return end
@@ -4995,6 +5000,7 @@ local function performEntry(ctx,entry,late)
                 return remote:FireServer(unpackArgs(args,1,args.n))
             end))
             ctx.requestDone = true
+            if entry.remote=="vote_start" then API:_TrackStartVote(result) end
             if not active(ctx) then return end
             check(result[1],"Request error: " .. tostring(result[2]))
             if isRejected(result) then
@@ -5112,7 +5118,7 @@ end
 function API:SetWaveRules(patch)
     check(type(patch)=="table","Wave-rule patch must be a table")
     local merged=normalizeWaveRules(self.autoRules)
-    for _,kind in ipairs({"upgrade","sell","replay"}) do
+    for _,kind in ipairs({"upgrade","sell","replay","start"}) do
         if patch[kind]~=nil then
             check(type(patch[kind])=="table","Invalid " .. kind .. " settings")
             for key,value in pairs(patch[kind]) do merged[kind][key]=value end
@@ -5123,7 +5129,10 @@ function API:SetWaveRules(patch)
     local r=self.autoRuntime
     r.generation,r.paused,r.nextAt,r.perUnit=r.generation+1,false,0,{}
     r.status="Wave rules updated; settings are saved with the macro"
-    if self.replayRuntime then self:_ConfigureReplay() end
+    if self.replayRuntime then
+        self:_ConfigureReplay()
+        if self._ConfigureStartVote then self:_ConfigureStartVote() end
+    end
     return self.autoRules
 end
 function API:SaveWaveRules(name)
@@ -5284,9 +5293,99 @@ function API:SetAutoReplay(enabled)
     local patch={enabled=enabled}
     if enabled then patch.repeatMacro=true end
     self:SetWaveRules({replay=patch})
-    notify(enabled and "Auto Replay enabled; Repeat is on" or "Auto Replay disabled")
+    notify(enabled and "Auto Replay enabled" or "Auto Replay disabled")
 end
 API:_ConfigureReplay()
+
+local function wantsStartVote()
+    return API.autoRules.start.enabled or
+        (API.replayRuntime.awaitStart and API.autoReplay and API.autoRules.replay.autoStart)
+end
+function API:_ConfigureStartVote()
+    local r,enabled=self.replayRuntime,self.autoRules.start.enabled
+    if r.startEnabled~=enabled then
+        r.startEnabled=enabled
+        if enabled and not r.startVoted and not r.startCall then
+            r.startAttempts,r.startBlocked,r.startAt=0,false,os.clock()+0.5
+        end
+    end
+end
+function API:SetAutoVoteStart(enabled)
+    self:SetWaveRules({start={enabled=enabled==true}})
+    notify(enabled and "Auto Vote Start enabled" or "Auto Vote Start disabled")
+end
+function API:_StartVoteManaged()
+    local r=self.replayRuntime
+    return flag("GameStarted")==true or r.startCall~=nil or (r.startWaiting and r.startVoted==true)
+end
+function API:_TrackStartVote(result)
+    local r=self.replayRuntime
+    if not result[1] then
+        r.startBlocked=true; r.startStatus="Start vote error: " .. tostring(result[2])
+    elseif isRejected(result) then
+        r.startAt=os.clock()+3
+        r.startStatus="Start vote rejected; waiting to retry"
+    else
+        r.startVoted=true; r.startStatus="Start vote sent; waiting for players/match"
+    end
+end
+local function startVoteTick(now)
+    local r=API.replayRuntime
+    local started,finished=flag("GameStarted"),flag("GameFinished")
+    if started==true or finished==true then
+        if r.startWaiting then r.startSession=(r.startSession or 0)+1 end
+        r.startWaiting=false
+        r.startVoted,r.startAttempts,r.startBlocked,r.startAt=false,0,false,nil
+        r.startStatus=finished==true and "Waiting for the next match" or "Match already started"
+        return
+    end
+    if started~=false or finished~=false then r.startStatus="Waiting for match flags"; return end
+    if not r.startWaiting then
+        r.startWaiting=true; r.startSession=(r.startSession or 0)+1
+        r.startVoted,r.startAttempts,r.startBlocked,r.startAt=false,0,false,now+0.5
+    end
+    if not wantsStartVote() then r.startStatus="Auto Vote Start is off"; return end
+    if API.autoRuntime.paused then r.startStatus="Auto Vote Start paused"; r.startAt=now+0.5; return end
+    if r.startCall then
+        r.startStatus=now-r.startCall.started>(Options.CallTimeout or 8)
+            and "Start vote timed out; waiting for its result" or "Sending start vote"
+        return
+    end
+    if r.startVoted then r.startStatus="Start vote sent; waiting for players/match"; return end
+    if r.startBlocked then return end
+    if r.startAttempts>=3 then r.startStatus="Start vote rejected 3 times; switch Auto Vote Start off/on to retry"; return end
+    if now<(r.startAt or now) or r.call then return end
+    if API.mode=="finalizing" or API.learnReplay then r.startStatus="Waiting for saving/learning to finish"; return end
+    local ctx=API.context
+    if API.mode=="playing" and ctx and ctx.busy then return end
+    local map=workspace:FindFirstChild("_MAP_CONFIG")
+    local lobby=map and map:FindFirstChild("IsLobby")
+    local loaded=map and map:FindFirstChild("MapLoaded")
+    local ready=workspace:FindFirstChild("SERVER_READY")
+    if lobby and lobby.Value==true then r.startStatus="Waiting outside the lobby"; return end
+    if (loaded and loaded.Value~=true) or (ready and ready.Value~=true) or not unitsFolder() then
+        r.startStatus="Waiting for the map to load"; return
+    end
+    local container=endpoints()
+    if not container or not container:FindFirstChild("vote_start") then r.startStatus="Waiting for the start-vote endpoint"; return end
+    local call={session=r.startSession,started=now}
+    r.startCall=call
+    r.startStatus="Sending start vote"
+    task.spawn(function()
+        if not API.alive or not wantsStartVote() or API.autoRuntime.paused or r.startSession~=call.session
+            or flag("GameStarted")~=false or flag("GameFinished")~=false then
+            if r.startCall==call then r.startCall=nil end
+            return
+        end
+        r.startAttempts=r.startAttempts+1
+        local result=pack(pcall(function() return checkRemote("vote_start","InvokeServer"):InvokeServer() end))
+        if r.startCall==call then r.startCall=nil end
+        if not API.alive or r.startSession~=call.session then return end
+        -- Keep a completed vote even if the toggle was switched off in flight.
+        API:_TrackStartVote(result)
+    end)
+end
+API:_ConfigureStartVote()
 
 local function finishMacroForReplay()
     if API.mode~="playing" then return end
@@ -5310,51 +5409,17 @@ local function replayTick(now)
     if not finished then
         if r.inEnd then
             r.awaitStart=config.enabled and config.autoStart
-            r.startVoted,r.startAttempts,r.startAt=false,0,now+0.5
             r.session=r.session+1
             r.endAt,r.nextAt,r.attempts,r.sent,r.blocked=nil,nil,0,false,false
         end
         r.inEnd=false
-        r.status=config.enabled and "Waiting for the match to finish" or "Auto Replay is off"
         if flag("GameStarted")==true then r.awaitStart=false end
-        if r.awaitStart and config.enabled then
-            r.status=r.startVoted and "Start vote sent; waiting for players/match" or "Waiting to start the replayed match"
-            if r.startCall then
-                r.status=now-(r.startSentAt or now)>(Options.CallTimeout or 8)
-                    and "Start vote timed out; waiting for its result" or "Sending start vote"
-            end
-        end
-        if r.awaitStart and config.enabled and config.autoStart and not API.autoRuntime.paused
-            and not r.startVoted and not r.call and not r.startCall and now>=(r.startAt or now) then
-            local map=workspace:FindFirstChild("_MAP_CONFIG")
-            local lobby=map and map:FindFirstChild("IsLobby")
-            local loaded=map and map:FindFirstChild("MapLoaded")
-            local ready=workspace:FindFirstChild("SERVER_READY")
-            if (lobby and lobby.Value==true) or (loaded and loaded.Value~=true) or (ready and ready.Value~=true) then return end
-            local container=endpoints()
-            if not container or not container:FindFirstChild("vote_start") then r.status="Waiting for the start-vote endpoint"; return end
-            if r.startAttempts>=config.maxAttempts then r.status="Start vote rejected; use Vote to start match"; return end
-            local session=r.session
-            r.startAttempts=r.startAttempts+1
-            r.startCall=true
-            r.startSentAt=now
-            r.status="Voting to start the replayed match"
-            task.spawn(function()
-                if not API.alive or not API.autoReplay or API.autoRuntime.paused or flag("GameStarted")==true
-                    or flag("GameFinished")==true then r.startCall=false; return end
-                local result=pack(pcall(function() return checkRemote("vote_start","InvokeServer"):InvokeServer() end))
-                r.startCall=false
-                if not API.alive or r.session~=session then return end
-                if not result[1] then
-                    r.startVoted=true; r.status="Start vote error: " .. tostring(result[2])
-                elseif isRejected(result) then
-                    r.startAt=os.clock()+config.retryDelay
-                    r.status="Start vote rejected; waiting to retry"
-                else r.startVoted=true; r.status="Start vote sent; waiting for the match" end
-            end)
-        end
+        startVoteTick(now)
+        r.status=r.awaitStart and config.enabled and config.autoStart and r.startStatus
+            or config.enabled and "Waiting for the match to finish" or "Auto Replay is off"
         return
     end
+    startVoteTick(now)
     if not r.inEnd then
         r.inEnd=true; r.session=r.session+1
         r.endAt,r.nextAt,r.attempts,r.sent,r.blocked=now,nil,0,false,false
@@ -5460,6 +5525,7 @@ function API:SaveDiagnostics()
         placeId=game.PlaceId,unitModels={},capture="passive tail forwarding",recentActions={},autoRules=self.autoRules,
         waveRuleStatus=self.autoRuntime.status,waveRulesPaused=self.autoRuntime.paused,
         replayStatus=self.replayRuntime.status,replayAttempts=self.replayRuntime.attempts,
+        startVoteStatus=self.replayRuntime.startStatus,startVoteAttempts=self.replayRuntime.startAttempts,
         playback=self.context and not self.context.recording and self.context.audit or nil,
         activeRequest=self.context and self.context.activeAudit or nil,uiError=self.uiError}
     local actions=self.document and self.document.actions or {}
@@ -5513,7 +5579,7 @@ if Options.ShowUI~=false then
     local app=MattLib.new({id="aa-macro-v2",design="Vector",wallpaperAssets=false,capabilities={},
         onError=function(message) notify("UI: " .. tostring(message)) end})
     API.uiApp=app
-    local window=app:CreateWindow({Id="macro",Title="MAA 2.3",Design="Vector",Size={800,620},
+    local window=app:CreateWindow({Id="macro",Title="MAA 2.4",Design="Vector",Size={800,620},
         MinSize={520,400},OpenKey="RightControl",OnClose=function() API:Shutdown() end})
     API.uiWindow=window
     local function try(fn)
@@ -5563,13 +5629,14 @@ if Options.ShowUI~=false then
         -- Set an empty value before replacing options so a removed file is valid.
         saved:SetValue(""); saved:Update({Options=list}); saved:SetValue(list[1])
     end) end})
-    local playback=macro:AddSection({Title="Playback & repeat"})
+    local playback=macro:AddSection({Title="Playback"})
     local playStart=playback:AddDropdown({Title="Play start",Options={"Sync current match","Next match"},Default="Sync current match"})
     local playControl=playback:AddToggle({Title="Play",Default=false,
-        Description="Switch on to play; switch off to stop.",Callback=function(value)
+        Description="Play every match while enabled. Switch off to stop.",Callback=function(value)
             runAction("play",value,function()
                 if value then
                     if API.name~=name:GetValue() or not API.document then API:Load(name:GetValue()) end
+                    API:SetLoop(true)
                     API:Play(nil,playStart:GetValue()=="Next match" and "match" or "auto")
                 elseif API.mode=="playing" or API.mode=="play_armed" or API.mode=="play_ready" or API.mode=="waiting_round" then
                     API:Stop()
@@ -5594,8 +5661,8 @@ if Options.ShowUI~=false then
         local playText=mode=="play_armed" and "Waiting for the next match. Switch off to cancel."
             or mode=="play_ready" and "Waiting for the map to load. Switch off to cancel."
             or mode=="waiting_round" and "Waiting to repeat next match. Switch off to stop."
-            or playing and "Playing now. Switch off to stop."
-            or "Switch on to play; switch off to stop."
+            or playing and "Playing now; the next match repeats automatically. Switch off to stop."
+            or "Play every match while enabled. Switch off to stop."
         syncingActions=true
         if recordControl:GetValue()~=recordValue then recordControl:SetValue(recordValue) end
         if playControl:GetValue()~=playValue then playControl:SetValue(playValue) end
@@ -5612,8 +5679,10 @@ if Options.ShowUI~=false then
         end
         syncingActions=false
     end
-    playback:AddButton({Title="Vote to start match",Callback=function() try(function() checkRemote("vote_start","InvokeServer"):InvokeServer() end) end})
-    local repeatControl=playback:AddToggle({Title="Repeat after match resets",Default=API.loop,Callback=function(value) try(function() API:SetLoop(value) end) end})
+    local autoStartControl=playback:AddToggle({Title="Auto Vote Start",Default=API.autoRules.start.enabled,
+        Description="Vote automatically before each match, including the first match.",
+        Callback=function(value) if not API.syncingStartUI then try(function() API:SetAutoVoteStart(value) end) end end})
+    local autoStartStatus=playback:AddParagraph({Content="Auto Vote Start is off"})
     local replayControl=playback:AddToggle({Title="Auto Replay at match end",Default=API.autoReplay,Callback=function(value)
         if not API.syncingReplayUI then try(function() API:SetAutoReplay(value) end) end
     end})
@@ -5680,6 +5749,10 @@ if Options.ShowUI~=false then
     local lastState,lastClock,lastProgress
     API.updateUI=function()
         syncActions()
+        API.syncingStartUI=true
+        if autoStartControl:GetValue()~=API.autoRules.start.enabled then autoStartControl:SetValue(API.autoRules.start.enabled) end
+        API.syncingStartUI=false
+        autoStartStatus:Update({Content=API.replayRuntime.startStatus or "Auto Vote Start is off"})
         local c,ctx=API:Counts(),API.context
         local count=API.document and #API.document.actions or 0
         local text=string.format("%s\n%d recorded  |  %d pending  |  %d unconfirmed\n%s",API.mode,c.successful,c.pending,c.failed,API.message)
@@ -5690,7 +5763,6 @@ if Options.ShowUI~=false then
         if clockText~=lastClock then clockLabel:Update({Content=clockText}); lastClock=clockText end
         local fraction=count>0 and ctx and math.min(1,math.max(0,(ctx.index-1)/count)) or 0
         if fraction~=lastProgress then progress:SetValue(fraction); lastProgress=fraction end
-        if repeatControl:GetValue()~=API.loop then repeatControl:SetValue(API.loop) end
         API.syncingReplayUI=true
         if replayControl:GetValue()~=API.autoReplay then replayControl:SetValue(API.autoReplay) end
         if replayDelay:GetValue()~=API.autoRules.replay.delay then replayDelay:SetValue(API.autoRules.replay.delay) end
@@ -5709,5 +5781,5 @@ if Options.ShowUI~=false then
     end
     API.updateUI()
 end
-notify("MAA 2.3 ready: use the Record and Play toggles to start and stop.")
+notify("MAA 2.4 ready: Auto Vote Start can vote before every match.")
 return API

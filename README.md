@@ -2,7 +2,7 @@
 
 Roblox action macro with the bundled MattLib UI, JSON recordings, and wave-aware playback.
 
-Version 2.3 replaces the Record and Play buttons with state-aware toggles. Record OFF stops and saves; Play OFF stops playback. Current/next-match start dropdowns preserve both workflows. Auto Replay, one JSON per macro, and owned-unit wave upgrade/sell rules remain available.
+Version 2.4 adds Auto Vote Start before the first match and after resets. Play now repeats automatically while its toggle stays on; the separate Repeat control is removed. Record OFF stops and saves, and Play OFF stops playback and future repeats. Auto Replay, one JSON per macro, and owned-unit wave rules remain available.
 
 ## Run the latest version
 
@@ -20,7 +20,7 @@ The stable loader fetches the current `main.lua` with a timestamp query on every
 4. Switch **Record OFF** to stop and save. Switching off before the next match cancels an armed recording.
 5. Choose **Play start** (Sync current match or Next match) and switch **Play ON**. Switch **Play OFF** to stop. Timing defaults to **Adaptive / Catch up / Auto**.
 
-The toggles follow the real operation state, including waiting for a match or repeat. Playback completion and failed starts switch Play off. Conflicting controls are disabled while recording, playing, or saving, and rapid clicks cannot create duplicate operations.
+Play stays on after completion or an early loss and restarts the macro at each new match. Switch it off to stop. Failed starts or playback errors switch it off. Conflicting controls are disabled while recording, playing, or saving, and rapid clicks cannot create duplicate operations.
 
 Use a new v2 recording for wave/time synchronization. Legacy files retain their offset timeline. Local recordings remain under the executor's `AA_Macros/` folder and are not uploaded.
 
@@ -34,9 +34,15 @@ Normal save/play creates only `<name>.json`. Drafts, staged copies, backups, and
 
 ## Auto Replay
 
-On **Macro**, enable **Auto Replay at match end**. No learned button or loaded macro is required. The default delay is two seconds. Enabling it also turns on macro Repeat; uncheck Repeat for vote-only operation. It handles early losses, waits for a real reset, and can send a start vote if the replayed match needs one. Already-sent votes are not spammed; explicit rejections have bounded retries. **Stop everything** pauses replay too. Save its settings with the other rules in the same JSON.
+On **Macro**, enable **Auto Replay at match end**. No learned button or loaded macro is required. The default delay is two seconds. Leave **Play ON** to run the macro in each new match; leave Play off for standalone replay voting. It handles early losses, waits for a real reset, and can send a start vote if the replayed match needs one. Already-sent votes are not spammed; explicit rejections have bounded retries. **Stop everything** pauses replay too. Save its settings with the other rules in the same JSON.
 
-See [the usage guide](docs/USAGE.md) for timing, repeat playback, and compatibility limits. See [validation](docs/VALIDATION.md) for 59 core scenarios and 16 MattLib integration checks. These checks used local engine doubles; live-game/executor compatibility remains unverified.
+## Auto Vote Start
+
+The **Auto Vote Start** toggle replaces the manual start button. Enable it to vote before the first match and after resets. It waits for the map and match flags, skips lobbies and already-started games, and shares vote tracking with Replay and recorded start steps. Explicit rejections retry up to three times with three-second spacing. It defaults off and saves in the same macro JSON. **Stop everything** pauses it too.
+
+For a full automatic cycle, enable **Play**, **Auto Replay at match end**, and **Auto Vote Start**. No separate Repeat toggle is needed.
+
+See [the usage guide](docs/USAGE.md) for timing, automatic playback, and compatibility limits. See [validation](docs/VALIDATION.md) for 75 core scenarios and 17 MattLib integration checks. These checks used local engine doubles; live-game/executor compatibility remains unverified.
 
 ## Updating
 

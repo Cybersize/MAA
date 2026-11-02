@@ -1,4 +1,4 @@
-MAA 2.3
+MAA 2.4
 
 Run the same GitHub loader to get the current version:
 
@@ -6,7 +6,7 @@ Run the same GitHub loader to get the current version:
 loadstring(game:HttpGet("https://raw.githubusercontent.com/Cybersize/MAA/main/loader.lua"))()
 ```
 
-You can also run the local `MAA.lua` file. The panel should show **MAA 2.3**. MattLib 1.2.1 is embedded with its MIT notice; no separate UI download is needed. Right Ctrl hides/shows the window. The designs are selectable in Diagnostics.
+You can also run the local `MAA.lua` file. The panel should show **MAA 2.4**. MattLib 1.2.1 is embedded with its MIT notice; no separate UI download is needed. Right Ctrl hides/shows the window. The designs are selectable in Diagnostics.
 
 One recording file
 
@@ -22,8 +22,16 @@ Recording and playback
 2. Place, upgrade, change priority, sell, and use supported abilities/votes normally. Spawn preserves the UUID and all CFrame components. Sold models retain their macro identity after moving to ReplicatedStorage.
 3. Switch **Record OFF** to stop and save the same JSON. Switching it off before an armed recording starts only cancels the wait. While saving, both toggles are disabled and the panel shows **Saving recording...**. Placement confirmation waits for its live unit; unavailable confirmation fields are marked `request only` in JSON. Unconfirmed attempts remain marked and are skipped during playback.
 4. On the same account/map with the same unit inventory, choose the macro name and set **Play start → Sync current match** or **Next match**. Switch **Play ON**; it loads the named JSON when needed. Switch **Play OFF** to stop or cancel a pending start. The timing defaults are **Adaptive / Catch up / Auto**.
-5. Play stays on while waiting for map readiness or the next repeat match. It turns off when playback completes without Repeat, stops, or fails. Record and Play cannot run together; conflicting controls are disabled. Rapid clicks do not create duplicate sessions, and an unsuccessful start restores the toggle to its actual state.
+5. **Play ON always repeats automatically.** After completion or an early loss, Play stays on and waits for the next match. Each new match restarts the macro. There is no separate Repeat toggle. Switch Play off to cancel playback and future repeats. A failed start or playback error switches it off. Record and Play cannot run together; conflicting controls are disabled. Rapid clicks do not create duplicate sessions.
 6. Switching either active toggle off and **Stop everything** pause wave rules and Auto Replay as well. A request already sent to the server can still finish. Starting recording/playback resumes configured rules; standalone rules also have explicit Pause/Resume buttons.
+
+Auto Vote Start
+
+The **Macro → Auto Vote Start** toggle replaces the manual start-vote button. It defaults off. When enabled, it sends a zero-argument `vote_start` request before the first match and after match resets, without requiring a loaded macro or Auto Replay.
+
+It waits for the match flags, map readiness, and endpoint. It skips lobbies, running matches, and result screens. A sent vote is remembered for that waiting period, even if you change settings. Recorded start votes and Replay's start voting share the same tracking to avoid duplicates. Explicit rejections retry at three-second intervals, up to three automatic attempts; errors and unresolved calls are not spammed. **Stop everything** pauses it too. Save the toggle with **Save wave rules in this macro JSON**; old JSONs default it off.
+
+To automate a full cycle, enable **Play**, **Auto Replay at match end**, and **Auto Vote Start**. Play runs the macro each match, Auto Replay requests the next match, and Auto Vote Start votes when the new match is waiting to begin.
 
 Wave auto-upgrade and auto-sell
 
@@ -51,12 +59,12 @@ Repeat and diagnostics
 On the **Macro** tab, enable **Auto Replay at match end**. No learning step or loaded recording is required. It uses the built-in `set_game_finished_vote("replay")` request. The optional learned-argument override remains available if the game's request format differs.
 
 - **Replay delay (seconds)** defaults to `2`. It can be changed from 0 to 60 seconds.
-- Enabling Auto Replay also enables macro Repeat. Turn Repeat off if you want only replay voting and standalone wave rules. A macro starts repeating after you have started playback; simply loading a file does not launch it.
+- Leave **Play ON** to run the macro in every new match. Auto Replay can also run by itself with Play off; simply loading a file never launches a macro.
 - At a normal finish or early loss, pending future-wave playback is cancelled. A repeating macro waits for the next actual match reset instead of hanging on unreachable waves.
 - A sent vote is not repeated while waiting for the server or other players. Explicit rejections retry with spacing, up to three attempts by default. Errors and unresolved RPCs stop repeated voting; status is displayed in the panel.
 - **Auto-start replayed match** defaults on. After a reset, it sends a zero-argument start vote only if the game has not already started, its endpoint is ready, and the map is not a lobby. Disable it for manual starts.
 - **Stop everything** pauses replay and start voting too. Replay waits while a recording is active or a manual argument-learning session is pending.
-- **Save wave rules in this macro JSON** stores the replay toggle, repeat preference, delay, and start setting with upgrade/sell settings. No additional JSON is created.
+- **Save wave rules in this macro JSON** stores the Replay and Auto Vote Start settings with upgrade/sell settings. No additional JSON is created. Play itself starts only when you enable it.
 
 These controls operate within the current client/server session. A new Roblox client still requires running/loading MAA again; teleport reinjection is not installed. The built-in request has not been verified against your live server; use diagnostics and the optional override if the vote is rejected.
 
@@ -64,4 +72,4 @@ Playback reports remain in memory. **Save clock / unit diagnostics JSON** explic
 
 The namecall recorder requires `hookmetamethod`, `getnamecallmethod`, `readfile`, `writefile`, and `loadstring` for the embedded UI. Separately cached native-method calls can bypass namecall capture. The hook only queues plain data and forwards the original request; processing runs outside it. Movement and camera input are outside this action macro.
 
-The bundle compiles with official Luau 0.745 and passed 59 core scenarios plus 16 actual-MattLib integration checks in local engine doubles. It has not been verified in the live game or your executor. Start with a short recording and low-risk wave settings before using a full run.
+The bundle compiles with official Luau 0.745 and passed 75 core scenarios plus 17 actual-MattLib integration checks in local engine doubles. It has not been verified in the live game or your executor. Start with a short recording and low-risk wave settings before using a full run.

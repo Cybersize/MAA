@@ -1,4 +1,4 @@
-MAA 2.2
+MAA 2.3
 
 Run the same GitHub loader to get the current version:
 
@@ -6,7 +6,7 @@ Run the same GitHub loader to get the current version:
 loadstring(game:HttpGet("https://raw.githubusercontent.com/Cybersize/MAA/main/loader.lua"))()
 ```
 
-You can also run the local `MAA.lua` file. The panel should show **MAA 2.2**. MattLib 1.2.1 is embedded with its MIT notice; no separate UI download is needed. Right Ctrl hides/shows the window. The designs are selectable in Diagnostics.
+You can also run the local `MAA.lua` file. The panel should show **MAA 2.3**. MattLib 1.2.1 is embedded with its MIT notice; no separate UI download is needed. Right Ctrl hides/shows the window. The designs are selectable in Diagnostics.
 
 One recording file
 
@@ -18,11 +18,12 @@ If `makefolder` is unavailable, the same files use the prefix `AA_Macro_` in the
 
 Recording and playback
 
-1. Give the macro a name, then use **Record this match now** or **Arm recording for next match**.
+1. Give the macro a name. Choose **Record start → This match** or **Next match**, then switch **Record ON**. Next match keeps the toggle on while waiting for a new match.
 2. Place, upgrade, change priority, sell, and use supported abilities/votes normally. Spawn preserves the UUID and all CFrame components. Sold models retain their macro identity after moving to ReplicatedStorage.
-3. Use **Stop / save recording**. Placement confirmation waits for its live unit; unavailable confirmation fields are marked `request only` in JSON. Unconfirmed attempts remain marked and are skipped during playback.
-4. Load the recording on the same account/map with the same unit inventory. Use **Play / sync current match** or **Play next match**. The defaults are **Adaptive / Catch up / Auto**.
-5. **Stop playback** and **Stop everything** pause wave rules as well. A request already sent to the server can still finish. Starting recording/playback resumes configured rules; standalone rules also have explicit Pause/Resume buttons.
+3. Switch **Record OFF** to stop and save the same JSON. Switching it off before an armed recording starts only cancels the wait. While saving, both toggles are disabled and the panel shows **Saving recording...**. Placement confirmation waits for its live unit; unavailable confirmation fields are marked `request only` in JSON. Unconfirmed attempts remain marked and are skipped during playback.
+4. On the same account/map with the same unit inventory, choose the macro name and set **Play start → Sync current match** or **Next match**. Switch **Play ON**; it loads the named JSON when needed. Switch **Play OFF** to stop or cancel a pending start. The timing defaults are **Adaptive / Catch up / Auto**.
+5. Play stays on while waiting for map readiness or the next repeat match. It turns off when playback completes without Repeat, stops, or fails. Record and Play cannot run together; conflicting controls are disabled. Rapid clicks do not create duplicate sessions, and an unsuccessful start restores the toggle to its actual state.
+6. Switching either active toggle off and **Stop everything** pause wave rules and Auto Replay as well. A request already sent to the server can still finish. Starting recording/playback resumes configured rules; standalone rules also have explicit Pause/Resume buttons.
 
 Wave auto-upgrade and auto-sell
 
@@ -63,4 +64,4 @@ Playback reports remain in memory. **Save clock / unit diagnostics JSON** explic
 
 The namecall recorder requires `hookmetamethod`, `getnamecallmethod`, `readfile`, `writefile`, and `loadstring` for the embedded UI. Separately cached native-method calls can bypass namecall capture. The hook only queues plain data and forwards the original request; processing runs outside it. Movement and camera input are outside this action macro.
 
-The bundle compiles with official Luau 0.745 and passed 59 core scenarios plus seven actual-MattLib integration checks in local engine doubles. It has not been verified in the live game or your executor. Start with a short recording and low-risk wave settings before using a full run.
+The bundle compiles with official Luau 0.745 and passed 59 core scenarios plus 16 actual-MattLib integration checks in local engine doubles. It has not been verified in the live game or your executor. Start with a short recording and low-risk wave settings before using a full run.

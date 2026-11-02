@@ -2,7 +2,7 @@
 
 Roblox action macro with the bundled MattLib UI, JSON recordings, and wave-aware playback.
 
-Version 2.2 adds automatic Replay voting without a learning step, optional start voting after reset, and early-loss recovery. It keeps one JSON per macro and the owned-unit wave upgrade/sell rules.
+Version 2.3 replaces the Record and Play buttons with state-aware toggles. Record OFF stops and saves; Play OFF stops playback. Current/next-match start dropdowns preserve both workflows. Auto Replay, one JSON per macro, and owned-unit wave upgrade/sell rules remain available.
 
 ## Run the latest version
 
@@ -15,10 +15,12 @@ The stable loader fetches the current `main.lua` with a timestamp query on every
 ## Usage
 
 1. Run the loader and choose a macro name.
-2. Use **Record this match now** or arm recording for the next match.
+2. Choose **Record start** (This match or Next match) and switch **Record ON**.
 3. Place, upgrade, change priority, sell, and use supported abilities/votes normally.
-4. Choose **Stop / save recording**.
-5. Load the JSON and choose **Play / sync current match**. Timing defaults to **Adaptive / Catch up / Auto**.
+4. Switch **Record OFF** to stop and save. Switching off before the next match cancels an armed recording.
+5. Choose **Play start** (Sync current match or Next match) and switch **Play ON**. Switch **Play OFF** to stop. Timing defaults to **Adaptive / Catch up / Auto**.
+
+The toggles follow the real operation state, including waiting for a match or repeat. Playback completion and failed starts switch Play off. Conflicting controls are disabled while recording, playing, or saving, and rapid clicks cannot create duplicate operations.
 
 Use a new v2 recording for wave/time synchronization. Legacy files retain their offset timeline. Local recordings remain under the executor's `AA_Macros/` folder and are not uploaded.
 
@@ -34,7 +36,7 @@ Normal save/play creates only `<name>.json`. Drafts, staged copies, backups, and
 
 On **Macro**, enable **Auto Replay at match end**. No learned button or loaded macro is required. The default delay is two seconds. Enabling it also turns on macro Repeat; uncheck Repeat for vote-only operation. It handles early losses, waits for a real reset, and can send a start vote if the replayed match needs one. Already-sent votes are not spammed; explicit rejections have bounded retries. **Stop everything** pauses replay too. Save its settings with the other rules in the same JSON.
 
-See [the usage guide](docs/USAGE.md) for timing, repeat playback, and compatibility limits. See [validation](docs/VALIDATION.md) for 59 core scenarios and seven MattLib integration checks. These checks used local engine doubles; live-game/executor compatibility remains unverified.
+See [the usage guide](docs/USAGE.md) for timing, repeat playback, and compatibility limits. See [validation](docs/VALIDATION.md) for 59 core scenarios and 16 MattLib integration checks. These checks used local engine doubles; live-game/executor compatibility remains unverified.
 
 ## Updating
 

@@ -1,4 +1,4 @@
-MAA 2.2 validation
+MAA 2.3 validation
 
 The bundle compiles with official Luau 0.745. Its embedded MattLib 1.2.1 source remains pinned to `bb9187fa8be705a5b7225904b0dd737c9f612035`, with its license and hash in the file header.
 
@@ -22,7 +22,9 @@ The bundle compiles with official Luau 0.745. Its embedded MattLib 1.2.1 source 
 16. Auto-sell skips future unit actions/placements without breaking playback.
 17. Invalid rule settings are rejected before replacing loaded settings.
 
-Seven integration checks passed with the actual MattLib bundle under official Luau: four-tab mounting, wave-rule control callbacks, Record button activation, input preservation across all designs, UI replacement on re-execution, shutdown/resource cleanup, and the Auto Replay/delay controls without a learned vote.
+16 integration checks passed with the actual MattLib bundle under official Luau. They cover four-tab mounting; wave-rule callbacks; Auto Replay/delay controls; Record on/off with one-file saving; all four designs; UI replacement; shutdown cleanup; next-match recording cancellation; Play on/off; next-match playback cancellation; conflicting-control disabling; state synchronization after API calls and errors; failed-load rollback; rapid-click deduplication; readiness/repeat/completion states; and disabled toggles during finalization.
+
+Together with the 59 existing core scenarios, this is 75 passing local checks. Native toggle activation is exercised through MattLib's TextButton Activated signals in its engine double.
 
 These checks establish behavior only in the stated local doubles. No live-game RPCs were executed. They do not establish executor compatibility, real timer semantics, actual server acceptance, physical UI input behavior, or native visual appearance.
 

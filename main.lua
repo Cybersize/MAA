@@ -3899,7 +3899,7 @@ end
 return __require("init")
 
 ]====]
--- MAA v2.2 -- automatic replay, one macro JSON and owned-unit wave rules.
+-- MAA v2.3 -- state-aware Record/Play toggles, Auto Replay and wave rules.
 -- MattLib 1.2.1 is embedded, pinned and MIT licensed. No runtime downloads.
 -- Records request timestamps, not guaranteed server execution timestamps.
 local ENV = getgenv and getgenv() or _G
@@ -4501,7 +4501,7 @@ function API:Save(name)
     check(self.mode~="recording" and self.mode~="record_armed","Stop recording before saving")
     check(self.document~=nil,"There is no recording to save")
     self.document.autoRules=normalizeWaveRules(self.autoRules)
-    self.document.appVersion="2.2.0"
+    self.document.appVersion="2.3.0"
     local doc=validate(self.document)
     local path=filePath(name)
     local text=Http:JSONEncode(doc)
@@ -5513,7 +5513,7 @@ if Options.ShowUI~=false then
     local app=MattLib.new({id="aa-macro-v2",design="Vector",wallpaperAssets=false,capabilities={},
         onError=function(message) notify("UI: " .. tostring(message)) end})
     API.uiApp=app
-    local window=app:CreateWindow({Id="macro",Title="MAA 2.2",Design="Vector",Size={800,620},
+    local window=app:CreateWindow({Id="macro",Title="MAA 2.3",Design="Vector",Size={800,620},
         MinSize={520,400},OpenKey="RightControl",OnClose=function() API:Shutdown() end})
     API.uiWindow=window
     local function try(fn)
@@ -5530,9 +5530,32 @@ if Options.ShowUI~=false then
     local saved=files:AddDropdown({Title="Saved recordings",Options=names,Default=names[1],Callback=function(value)
         if value~="(enter a name above)" then name:SetValue(value) end
     end})
-    files:AddButton({Title="Record this match now",Variant="primary",Callback=function() try(function() API:Record(name:GetValue(),"now") end) end})
-    files:AddButton({Title="Arm recording for next match",Callback=function() try(function() API:Record(name:GetValue(),"match") end) end})
-    files:AddButton({Title="Stop / save recording",Callback=function() try(function() API:Stop() end) end})
+    local syncingActions,actionPending=false,nil
+    local syncActions
+    local function runAction(kind,value,fn)
+        if syncingActions then return end
+        if actionPending or not API.alive then
+            if syncActions then syncActions() end
+            return
+        end
+        actionPending={kind=kind,value=value}
+        if syncActions then syncActions() end
+        task.spawn(function()
+            local ok,err=pcall(fn)
+            if not ok then notify(tostring(err)) end
+            actionPending=nil
+            if API.alive and syncActions then syncActions() end
+        end)
+    end
+    local recordStart=files:AddDropdown({Title="Record start",Options={"This match","Next match"},Default="This match"})
+    local recordControl=files:AddToggle({Title="Record",Default=false,
+        Description="Switch on to record; switch off to stop and save.",Callback=function(value)
+            runAction("record",value,function()
+                if value then
+                    API:Record(name:GetValue(),recordStart:GetValue()=="Next match" and "match" or "now")
+                elseif API.mode=="recording" or API.mode=="record_armed" then API:Stop() end
+            end)
+        end})
     files:AddButton({Title="Load JSON",Callback=function() try(function() API:Load(name:GetValue()) end) end})
     files:AddButton({Title="Remove old helper JSONs",Callback=function() try(function() API:CleanupOldHelpers() end) end})
     files:AddButton({Title="Refresh file list",Callback=function() try(function()
@@ -5541,16 +5564,55 @@ if Options.ShowUI~=false then
         saved:SetValue(""); saved:Update({Options=list}); saved:SetValue(list[1])
     end) end})
     local playback=macro:AddSection({Title="Playback & repeat"})
-    playback:AddButton({Title="Play / sync current match",Variant="primary",Callback=function() try(function()
-        if API.name~=name:GetValue() or not API.document then API:Load(name:GetValue()) end
-        API:Play(nil,"auto")
-    end) end})
-    playback:AddButton({Title="Play next match",Callback=function() try(function()
-        if API.name~=name:GetValue() or not API.document then API:Load(name:GetValue()) end
-        API:Play(nil,"match")
-    end) end})
+    local playStart=playback:AddDropdown({Title="Play start",Options={"Sync current match","Next match"},Default="Sync current match"})
+    local playControl=playback:AddToggle({Title="Play",Default=false,
+        Description="Switch on to play; switch off to stop.",Callback=function(value)
+            runAction("play",value,function()
+                if value then
+                    if API.name~=name:GetValue() or not API.document then API:Load(name:GetValue()) end
+                    API:Play(nil,playStart:GetValue()=="Next match" and "match" or "auto")
+                elseif API.mode=="playing" or API.mode=="play_armed" or API.mode=="play_ready" or API.mode=="waiting_round" then
+                    API:Stop()
+                end
+            end)
+        end})
+    local lastActionOptions
+    syncActions=function()
+        local mode=API.mode
+        local recording=mode=="recording" or mode=="record_armed"
+        local playing=mode=="playing" or mode=="play_armed" or mode=="play_ready" or mode=="waiting_round"
+        local busy=actionPending~=nil or mode=="finalizing"
+        local recordValue,playValue=recording,playing
+        if actionPending then
+            if actionPending.kind=="record" then recordValue=actionPending.value
+            else playValue=actionPending.value end
+        end
+        local recordText=mode=="finalizing" and "Saving recording..."
+            or mode=="record_armed" and "Waiting for the next match. Switch off to cancel."
+            or recording and "Recording now. Switch off to stop and save."
+            or "Switch on to record; switch off to stop and save."
+        local playText=mode=="play_armed" and "Waiting for the next match. Switch off to cancel."
+            or mode=="play_ready" and "Waiting for the map to load. Switch off to cancel."
+            or mode=="waiting_round" and "Waiting to repeat next match. Switch off to stop."
+            or playing and "Playing now. Switch off to stop."
+            or "Switch on to play; switch off to stop."
+        syncingActions=true
+        if recordControl:GetValue()~=recordValue then recordControl:SetValue(recordValue) end
+        if playControl:GetValue()~=playValue then playControl:SetValue(playValue) end
+        local key=mode .. ":" .. tostring(busy)
+        if key~=lastActionOptions then
+            recordControl:Update({Disabled=busy or playing,Description=recordText})
+            playControl:Update({Disabled=busy or recording,Description=playText})
+            local locked=busy or recording or playing
+            recordStart:Update({Disabled=locked})
+            playStart:Update({Disabled=locked})
+            name:Update({Disabled=locked})
+            saved:Update({Disabled=locked})
+            lastActionOptions=key
+        end
+        syncingActions=false
+    end
     playback:AddButton({Title="Vote to start match",Callback=function() try(function() checkRemote("vote_start","InvokeServer"):InvokeServer() end) end})
-    playback:AddButton({Title="Stop playback",Callback=function() try(function() API:Stop() end) end})
     local repeatControl=playback:AddToggle({Title="Repeat after match resets",Default=API.loop,Callback=function(value) try(function() API:SetLoop(value) end) end})
     local replayControl=playback:AddToggle({Title="Auto Replay at match end",Default=API.autoReplay,Callback=function(value)
         if not API.syncingReplayUI then try(function() API:SetAutoReplay(value) end) end
@@ -5617,6 +5679,7 @@ if Options.ShowUI~=false then
     help:AddButton({Title="Unload macro",Callback=function() API:Shutdown() end})
     local lastState,lastClock,lastProgress
     API.updateUI=function()
+        syncActions()
         local c,ctx=API:Counts(),API.context
         local count=API.document and #API.document.actions or 0
         local text=string.format("%s\n%d recorded  |  %d pending  |  %d unconfirmed\n%s",API.mode,c.successful,c.pending,c.failed,API.message)
@@ -5646,5 +5709,5 @@ if Options.ShowUI~=false then
     end
     API.updateUI()
 end
-notify("MAA 2.2 ready: Auto Replay no longer requires learning the button.")
+notify("MAA 2.3 ready: use the Record and Play toggles to start and stop.")
 return API

@@ -2,7 +2,7 @@
 
 Roblox action macro with the bundled MattLib UI, JSON recordings, and wave-aware playback.
 
-Version 2.7 adds Auto Play with path/circle placement, saved map centers, priority, upgrades and sell-on-wave controls. It also corrects the four-support buff setup using the supplied video. Match automation, teleport resume, Record/Play toggles and single-JSON profiles remain available. Fast Forward is unavailable in the connected game build.
+Version 2.8 adds a visual placement editor with map markers, drag/zoom/pan, undo/redo, ordered actions and named saved plans. Path/circle Auto Play, staged support buffs, Match automation, teleport resume and Record/Play toggles remain available. Everything saves in one profile JSON. Fast Forward remains unavailable.
 
 ## Run the latest version
 
@@ -46,7 +46,15 @@ Teleport queuing restores settings and enabled playback using the latest GitHub 
 
 The **Auto Play** tab places equipped units without recording a macro. Choose Smart Path & Corners or Circle Placement, optionally set priority, upgrades and a sell wave, then enable Auto Play. It uses current funds/caps, valid surfaces and collision checks. It waits while macro Play is enabled and serializes automatic unit requests.
 
-For Circle Placement, choose the actual map/mode, click Set Circle Position, click the map, and Save Plan for Map. All saved map centers share the same profile JSON. Plan selection does not join a stage. Stop everything pauses Auto Play. The separate full visual action-plan editor in the second showcase is not included in these screenshot controls.
+For Circle Placement, choose the actual map/mode, click Set Circle Position, click the map, and Save Plan for Map. All saved map centers share the same profile JSON. Plan selection does not join a stage. Stop everything pauses Auto Play.
+
+## Visual placement editor
+
+Open **Auto Play → Saved Action Plans**, enter a name and choose **Create Plan**. Select an equipped unit and add/drag numbered markers on the 3D preview. Append spawn, target-upgrade, sell, priority, wait-wave and wait-seconds actions; reorder them with dependency checks. Zoom/pan, hide decorative objects, rotate markers and undo/redo changes. Save in the same profile JSON, close the editor, then enable **Auto Play Plan**. Leave macro Play off.
+
+The plan repeats every new match while enabled. Existing owned units/upgrades can satisfy steps, wrong-map/account plans wait, and unresolved or unconfirmed requests are never duplicated. Auto Play After Plan permits normal filling after completion when Auto Play is also enabled. Wave rules wait during the plan and resume after completion. Editing sends no game requests; opening pauses new automatic unit actions. Pending requests can still finish.
+
+All named plans share the existing JSON with recordings/settings. No editor drafts, undo logs or per-plan files are written. Delete/restore and recoverable save failures preserve the one-file workflow. See [usage](docs/USAGE.md) for controls, execution and limits.
 
 ## Buffs
 
@@ -56,7 +64,7 @@ Choose Auto, Four-unit relay or Five-unit pentagon. The corrected relay uses sta
 
 Save Buffs settings in the same macro JSON. Stop everything pauses the automation. Status reports observed support-unit buff strength; a valid formation does not guarantee full-team coverage or a sustained 100% loop. See [the research notes](docs/BUFF_COMBO_RESEARCH.md).
 
-See [the usage guide](docs/USAGE.md) and [validation](docs/VALIDATION.md). There are 157 passing local checks and clean Real static checks. The actual seven-tab UI and read-only placement planner were checked through Real with all automatic controls off. Successful live server placement/progression and sustained buff combos remain unverified.
+See [the usage guide](docs/USAGE.md) and [validation](docs/VALIDATION.md). There are 194 passing local scenarios and clean Real static checks. UI integration uses the actual MattLib with mocked services/viewport rendering. A matching target client was unavailable for native v2.8 editor checks. Live rendering/server behavior and sustained buff combos remain unverified.
 
 ## Updating
 

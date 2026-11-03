@@ -1,7 +1,7 @@
 {
   "name": "MAA",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "entrypoint": "main.lua",
-  "sha256": "b5f5374027438862e7cb154e8c109e81fd92a4a72151bbe1c8fdcee3393cfaa3",
+  "sha256": "8de54c25fdc3c605988ce12857364c8df09be7ddd6f8cec9d6a2a862d56b36a1",
   "mattlib_commit": "bb9187fa8be705a5b7225904b0dd737c9f612035"
 }

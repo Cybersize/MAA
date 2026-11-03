@@ -1,4 +1,4 @@
-# MAA 2.7
+# MAA 2.8
 
 Run the same GitHub loader to receive the latest version:
 
@@ -6,7 +6,7 @@ Run the same GitHub loader to receive the latest version:
 loadstring(game:HttpGet("https://raw.githubusercontent.com/Cybersize/MAA/main/loader.lua"))()
 ```
 
-The panel should show **MAA 2.7**. MattLib 1.2.1 remains embedded. Right Ctrl hides/shows the window. Choose a design in Diagnostics.
+The panel should show **MAA 2.8**. MattLib 1.2.1 remains embedded. Right Ctrl hides/shows the window. Choose a design in Diagnostics.
 
 ## Match controls
 
@@ -75,9 +75,34 @@ One automatic unit request runs at a time across placement, priority, upgrades, 
 
 For a circle plan, choose **Game Mode Category** and **Select Map / Stage**, join that map/mode, click **Set Circle Position (Click on Map)**, then click a placement surface. Esc cancels. Use **Save Plan for Map** to store the position in the same named macro/profile JSON. All map plans share that file; no per-map sidecar is created. Plan selection edits a plan; it does not join or teleport to that stage. Runtime Circle mode uses only a saved plan matching the actual map, category and place.
 
-Use **Save Auto Play settings in this macro JSON** for global controls without changing a circle position. **Stop everything** pauses Auto Play, and **Resume Auto Play** resumes enabled controls. Enabled Auto Play and its plans are included in teleport resume. Each new match resets placement state. The visual drag-and-drop action editor shown in the second reference is outside these screenshot controls and is not included here.
+Use **Save Auto Play settings in this macro JSON** for global controls without changing a circle position. **Stop everything** pauses Auto Play, and **Resume Auto Play** resumes enabled controls. Enabled Auto Play and its plans are included in teleport resume. Each new match resets placement state. The visual action editor is available in **Saved Action Plans**, below the Auto Play controls.
 
 When Commander/Windsong uses the staged relay, Auto Play holds that support family at the count required by its current setup step and checks mutual range. It caps that family at four for the relay even if the game's spawn cap is higher. It does not buy curses, alter traits, reposition existing units, or silently sell an incorrectly seeded group. Five-unit ring layouts still require valid placement; basic Smart Path placement does not promise that ring.
+
+## Visual placement editor and Action Plans
+
+The **Auto Play → Saved Action Plans** section adds the editor from the requested workflow. It uses MattLib around a separate 3D map preview and numbered unit markers. Editing never sends placement, upgrade or sale requests. Opening the editor pauses new MAA automatic unit actions; an already-sent server request can still finish.
+
+1. Join the map and mode you want to plan. Stop macro Record/Play, enter **Plan Name**, and click **Create Plan**. For an existing plan, choose **Saved Action Plans → Edit Plan**.
+2. Select an equipped unit, click **Add marker on map**, and click the preview. Drag a marker to move it. **Rotate 90°** changes its saved spawn orientation; the arrow shows its direction. Surface and obstacle checks reject invalid positions.
+3. Click a marker, then append **Upgrade**, **Sell**, or **Add priority**. Upgrade adds the next planned target level; select that action and use **Wait / target level value → Set value** to change it. Choose a target and use **Set priority** when editing a priority action.
+4. Enter a value and add **Wait wave** or **Wait seconds**. Select a row and use **Move ↑/↓** or **Delete** to edit the order. Spawn must precede its unit actions, and a sold unit cannot act again. Removing a Spawn removes that marker and its dependent actions. **Undo/Redo** keeps up to 50 draft transactions in memory.
+5. Use **+/−**, the mouse wheel, and **Fit** to zoom. Right-drag or choose **Pan view** to pan. **Hide plan** hides markers; **Objects** toggles decorative map geometry. Touch dragging and zoom buttons are supported.
+6. Click **Save plan to current profile JSON**, then close the editor. Choose the saved plan and enable **Auto Play Plan**. Leave macro Play off. The plan runs now when ready and runs again at every new match while enabled. Saving or closing does not enable execution automatically.
+
+The editor copies up to 1,800 static map parts into a local WorldModel and deletes the preview and listeners when closed or replaced. It does not change the game camera, move world objects, or run scripts from cloned parts. On narrow windows the action panel stacks beneath the map and remains scrollable. If another map is loaded, saved markers can still be inspected and actions reordered, but position edits require the original map/mode.
+
+All named action plans, map circle centers, macro actions and settings share the same `AA_Macros/<profile>.json`. Drafts and undo history stay in memory. **Delete Plan** saves its removal; **Restore deleted plan** can recover the latest deletion until script reload. Failed saves/deletions restore prior in-memory settings and retain recoverable file contents. Unsaved edits are not recovered after reload.
+
+Each action plan stores its map, mode, place, account, inventory UUIDs, positions, rotations and action order. Playback waits for those requirements, actual funds/caps and valid unoccupied positions. Existing owned units near their marker can satisfy a Spawn; completed upgrades/priorities are skipped. It never binds another player's unit. Explicit past-wave sale phases can skip an unnecessary purchase/upgrade on late starts; delays with uncertain timing are executed in order.
+
+Wait seconds counts elapsed active time and pauses during Stop, editing, match results or macro playback. Wave waits continue as soon as their minimum wave is reached. Wait actions can progress while another worker's request is outstanding, while unit requests remain serialized. This is an ordered plan, not a replay of historical combat; exact server execution still depends on replication, latency, funds and the server.
+
+One planned unit request runs at a time. Unknown outcomes and request errors stop that run; unresolved calls are never duplicated. Explicit rejections back off and stop after three attempts. A recognized insufficient-funds rejection waits for currency to increase. **Restart selected plan** starts again after pending requests return and can match already-present units.
+
+**Auto Play After Plan** permits normal Auto Play after completion only when **Enable Auto Play** is also on. Without it, automatic filling stays suspended. Wave upgrade/sell rules wait while a plan runs and can resume once it completes. Enabled Buffs can run between ordered unit actions. **Stop everything** pauses execution; enabling the plan or using a Resume control resumes configured automation. Enabled plans and selection are included in teleport resume without another JSON.
+
+Limits: 100 saved plans per profile, 64 unit markers and 500 actions per plan, 5,000 total planned actions. The native 3D preview and live server playback still need verification in the target game; the current validation uses engine doubles and a mocked viewport backend.
 
 ## Recording and playback
 
@@ -123,4 +148,4 @@ Map/account/place validation still applies. A recording for a different map must
 
 ## Verification
 
-The bundle compiles with official Luau 0.745, passes 157 local checks, and passes Real's static checker with zero errors/warnings. The seven-tab UI loaded in the actual client. Read-only planning found valid surface/collision-checked positions for every equipped unit after bounded scans and read real costs/caps, including the observed 63.27-second Commander active cooldown. All automatic controls remained off during live checks. No MAA spawn, cast, upgrade, sell or progression request was sent. Actual server acceptance, sustained buff uptime and the complete hidden transfer formula remain unverified. See [validation](VALIDATION.md).
+The final v2.8 bundle compiles under official Luau 0.745 and passes 194 local scenarios plus Real's static checks with zero errors/warnings. The actual embedded MattLib is exercised with mocked Roblox services and a mocked viewport renderer, including pointer-based marker adding/dragging, projection math, action controls, saving, closing and reinjection cleanup. A matching Anime Adventures client was unavailable for v2.8 live checks; the connected client was in another game. Native WorldModel rendering, physical-device input and server acceptance of the new plan worker remain unverified. See [validation](VALIDATION.md).

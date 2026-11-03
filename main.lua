@@ -3899,7 +3899,7 @@ end
 return __require("init")
 
 ]====]
--- MAA v2.7 -- Autonomous placement, map circle plans and Auto Play controls.
+-- MAA v2.8 -- Visual placement editor and ordered per-map action plans.
 local Resume=...
 -- MattLib 1.2.1 is embedded, pinned and MIT licensed. No runtime downloads.
 -- Records request timestamps, not guaranteed server execution timestamps.
@@ -3936,6 +3936,54 @@ check(finite(Options.MaxLateness or 0.25) and (Options.MaxLateness or 0.25) > 0,
     "MaxLateness must be a finite positive number")
 check(finite(Options.CallTimeout or 8) and (Options.CallTimeout or 8) > 0,
     "CallTimeout must be a finite positive number")
+local function normalizeActionPlan(raw)
+    check(type(raw)=="table","Placement plan must be a table")
+    local function text(v,label,limit)
+        check(type(v)=="string" and #v>0 and #v<=(limit or 100) and not v:find("%c"),"Invalid " .. label)
+        return v
+    end
+    local function integer(v,low,high,label)
+        check(finite(v) and v%1==0 and v>=low and v<=high,"Invalid " .. label); return v
+    end
+    local p={name=text(raw.name,"plan name",80),map=text(raw.map,"plan map",120),category=text(raw.category,"plan category",30),
+        placeId=integer(raw.placeId,1,1e15,"plan place"),userId=integer(raw.userId,1,1e15,"plan owner"),units={},actions={}}
+    check(type(raw.units)=="table" and #raw.units<=64,"A plan supports up to 64 markers")
+    check(type(raw.actions)=="table" and #raw.actions<=500,"A plan supports up to 500 actions")
+    local ids,spawned,sold={},{},{}
+    for _,u in ipairs(raw.units) do
+        check(type(u)=="table","Invalid unit marker")
+        local id=text(u.id,"marker ID",40); check(not ids[id],"Duplicate marker ID"); ids[id]=true
+        check(type(u.position)=="table" and #u.position==3,"Marker needs three coordinates")
+        local point={}
+        for i=1,3 do check(finite(u.position[i]) and math.abs(u.position[i])<1e6,"Invalid marker coordinate"); point[i]=u.position[i] end
+        local angle=u.angle or 0; check(finite(angle),"Invalid marker rotation")
+        p.units[#p.units+1]={id=id,uuid=text(u.uuid,"equipped unit UUID",160),unitId=text(u.unitId,"unit type"),
+            slot=integer(u.slot,1,6,"unit slot"),position=point,angle=angle%(math.pi*2)}
+    end
+    local priorities={first=true,last=true,strongest=true,weakest=true,closest=true,farthest=true,flying=true,soaring=true}
+    for _,a in ipairs(raw.actions) do
+        check(type(a)=="table","Invalid planned action")
+        local entry={kind=a.kind}
+        if a.kind=="wave" then entry.value=integer(a.value,0,1000,"wait wave")
+        elseif a.kind=="delay" then check(finite(a.value) and a.value>=0 and a.value<=3600,"Wait seconds must be 0-3600"); entry.value=a.value
+        else
+            check(a.kind=="spawn" or a.kind=="upgrade" or a.kind=="sell" or a.kind=="priority","Unknown planned action")
+            check(ids[a.unit],"Action refers to an unknown marker"); entry.unit=a.unit
+            if a.kind=="spawn" then check(not spawned[a.unit],"A marker may spawn only once"); spawned[a.unit]=true
+            else
+                check(spawned[a.unit] and not sold[a.unit],"Spawn must precede a unit action, and sold units cannot act")
+                if a.kind=="upgrade" then entry.level=integer(a.level,1,100,"target upgrade")
+                elseif a.kind=="sell" then sold[a.unit]=true
+                else check(priorities[a.priority]==true,"Invalid planned priority"); entry.priority=a.priority end
+            end
+        end
+        p.actions[#p.actions+1]=entry
+    end
+    for id in pairs(ids) do check(spawned[id],"Each marker needs a Spawn action") end
+    return p
+end
+
+
 local function normalizeWaveRules(rules)
     rules=rules or {}
     check(type(rules)=="table","Wave rules must be a table")
@@ -3991,7 +4039,20 @@ local function normalizeWaveRules(rules)
     check(finite(autoplay.radius) and autoplay.radius>=5 and autoplay.radius<=100,"Circle radius must be 5-100 studs")
     check(autoplay.maxUpgrades<=100 and autoplay.sellWave<=1000,"Auto Play limits are too large")
 
-    local result={autoplay=autoplay,upgrade={enabled=enabled(u.enabled),startWave=integer(u.startWave,1,"Upgrade start wave"),
+    local pr=part(rules.planner,"Action Plan")
+    local actionPlans={}; local planCount,totalActions=0,0
+    check(pr.plans==nil or type(pr.plans)=="table","Invalid saved action plans")
+    for name,p in pairs(pr.plans or {}) do
+        local normalized=normalizeActionPlan(p)
+        check(name==normalized.name,"Plan name differs from its key")
+        planCount=planCount+1; totalActions=totalActions+#normalized.actions
+        check(planCount<=100 and totalActions<=5000,"Too many saved plans/actions")
+        actionPlans[name]=normalized
+    end
+    local selected=pr.selected or ""
+    check(type(selected)=="string" and #selected<=80,"Invalid selected action plan")
+    local planner={enabled=enabled(pr.enabled),after=enabled(pr.after),selected=selected,plans=actionPlans}
+    local result={planner=planner,autoplay=autoplay,upgrade={enabled=enabled(u.enabled),startWave=integer(u.startWave,1,"Upgrade start wave"),
         stopWave=integer(u.stopWave,0,"Upgrade stop wave"),targetLevel=integer(u.targetLevel,0,"Target upgrade")},
         sell={enabled=enabled(s.enabled),wave=integer(s.wave,20,"Sell wave")},
         start={enabled=enabled(start.enabled)},
@@ -4541,7 +4602,7 @@ function API:Save(name)
     check(self.mode~="recording" and self.mode~="record_armed","Stop recording before saving")
     check(self.document~=nil,"There is no recording to save")
     self.document.autoRules=normalizeWaveRules(self.autoRules)
-    self.document.appVersion="2.7.0"
+    self.document.appVersion="2.8.0"
     local doc=validate(self.document)
     local path=filePath(name)
     local text=Http:JSONEncode(doc)
@@ -4628,6 +4689,7 @@ local function beginRecording(anchor)
     notify("Recording " .. API.name .. " (" .. anchor .. " clock)")
 end
 function API:Record(name, trigger)
+    check(not (self.plannerRuntime and self.plannerRuntime.open),"Close the visual editor before recording")
     check(self.mode == "idle" or self.mode == "record_armed", "Stop the active operation before recording")
     name, trigger = name or self.name, trigger or "now"
     filePath(name)
@@ -4721,7 +4783,7 @@ local function preflight(doc)
 end
 local function beginPlayback()
     local doc=validate(API.document)
-    check(#doc.actions>0,"This JSON contains wave rules only; enable them in Wave rules instead of Play")
+    check(#doc.actions>0,"This JSON contains settings only; use Auto Play, Action Plan, or Wave rules instead of macro Play")
     check(doc.placeId==game.PlaceId and doc.userId==Player.UserId,"Place or account differs from the recording")
     local config=workspace:FindFirstChild("_MAP_CONFIG")
     local loaded=config and config:FindFirstChild("MapLoaded")
@@ -4741,6 +4803,7 @@ local function beginPlayback()
     notify("Playing " .. API.name)
 end
 function API:Play(name, trigger)
+    check(not (self.plannerRuntime and self.plannerRuntime.open),"Close the visual editor before macro Play")
     check(self.mode == "idle", "Stop the active operation before playing")
     if name then self:Load(name) end
     local doc = validate(self.document)
@@ -4760,6 +4823,7 @@ function API:LearnReplay()
     notify("Learning: when the match ends, click the game's Replay button once")
 end
 function API:Shutdown()
+    if self._ClosePlanner then self:_ClosePlanner() end
     if self.autoRuntime then self:PauseWaveRules(true) end
     self.alive = false
     if self.context then self.context.cancelled = true end
@@ -5099,7 +5163,7 @@ local function playTick(ctx,now)
     if ctx.requestAt and not ctx.requestDone then
         check(now-ctx.requestAt <= (Options.CallTimeout or 8),"Server request timed out; playback stopped")
     end
-    if ctx.busy or (API.autoRuntime and API.autoRuntime.call) or (API.buffRuntime and API.buffRuntime.call) or (API.autoPlayRuntime and API.autoPlayRuntime.call) or now < (ctx.nextSend or 0) then return end
+    if ctx.busy or (API.autoRuntime and API.autoRuntime.call) or (API.buffRuntime and API.buffRuntime.call) or (API.autoPlayRuntime and API.autoPlayRuntime.call) or (API.plannerRuntime and API.plannerRuntime.call) or now < (ctx.nextSend or 0) then return end
     local entry = ctx.doc.actions[ctx.index]
     if not entry then
         if ctx.timingMode == "Offsets" and now-ctx.start < ctx.doc.duration then return end
@@ -5164,7 +5228,7 @@ end
 function API:SetWaveRules(patch)
     check(type(patch)=="table","Wave-rule patch must be a table")
     local merged=normalizeWaveRules(self.autoRules)
-    for _,kind in ipairs({"upgrade","sell","replay","start","match","buffs","autoplay"}) do
+    for _,kind in ipairs({"upgrade","sell","replay","start","match","buffs","autoplay","planner"}) do
         if patch[kind]~=nil then
             check(type(patch[kind])=="table","Invalid " .. kind .. " settings")
             for key,value in pairs(patch[kind]) do merged[kind][key]=value end
@@ -5179,6 +5243,7 @@ function API:SetWaveRules(patch)
         self:_ConfigureReplay()
         if self._ConfigureStartVote then self:_ConfigureStartVote() end
     end
+    if self._ConfigurePlanner then self:_ConfigurePlanner() end
     return self.autoRules
 end
 function API:SaveWaveRules(name)
@@ -5253,6 +5318,7 @@ end
 
 local function automationTick(now)
     local r,s=API.autoRuntime,Clock.sample
+    if API._PlannerHoldsAutomation and API:_PlannerHoldsAutomation("wave") then return end
     if (API.buffRuntime and API.buffRuntime.call) or (API.autoPlayRuntime and API.autoPlayRuntime.call) then return end
     if r.call then
         if not r.call.returned and now-r.call.started>(Options.CallTimeout or 8) then
@@ -5991,7 +6057,7 @@ local function buffTick(now)
     if flag("GameStarted")~=true or flag("GameFinished")==true then
         r.plans={}; r.status="Waiting for a match"; return
     end
-    if now<r.nextAt or API.mode=="finalizing" or API.autoRuntime.call or (API.autoPlayRuntime and API.autoPlayRuntime.call) or sellRuleDue() then return end
+    if now<r.nextAt or API.mode=="finalizing" or API.autoRuntime.call or (API.autoPlayRuntime and API.autoPlayRuntime.call) or (API.plannerRuntime and (API.plannerRuntime.call or API.plannerRuntime.open)) or sellRuleDue() then return end
     local ctx=API.context
     if API.mode=="playing" and ctx and ctx.busy then return end
     r.nextAt=now+0.2
@@ -6078,6 +6144,7 @@ do
     end
     local function key(c) return tostring(c.category) .. ":" .. tostring(c.map) end
     local function active()
+        if API._PlannerHoldsAutomation and API:_PlannerHoldsAutomation() then return false end
         return API.alive and API.autoRules.autoplay.enabled and not API.autoRuntime.paused
             and (API.mode=="idle" or API.mode=="recording") and flag("GameStarted")==true and flag("GameFinished")~=true
     end
@@ -6234,7 +6301,7 @@ do
         end
         return vec(hit.Position)
     end
-    local function free(row,p)
+    local function free(row,p,ignoreUnits)
         for _,road in ipairs(roads()) do
             if math.abs(p[2]-road.position[2])<row.height+2 and rectDistance(p,road)<row.radius+0.25 then return false end
         end
@@ -6272,6 +6339,7 @@ do
             folder:Destroy()
             if not ok or blocked then return false end
         end
+        if ignoreUnits then return true end
         local b=services()
         for _,model in ipairs(unitsFolder():GetChildren()) do
             if model:IsA("Model") and (owned(model)~=nil or b and b.tags:HasTag(model,"player_units")) then
@@ -6396,6 +6464,7 @@ do
             return
         end
         if not a.enabled then r.status="Auto Play is off"; return end
+        if API:_PlannerHoldsAutomation() then r.status="Waiting for the action plan/editor"; return end
         if self.autoRuntime.paused then r.status="Auto Play paused"; r.pick=nil; return end
         if self.mode~="idle" and self.mode~="recording" then r.status="Waiting while macro playback is enabled"; return end
         if not active() then r.scene=nil; r.status="Waiting for a match"; return end
@@ -6447,6 +6516,20 @@ do
             if not ok then chosen.state.blocked=true; r.status="Auto Play stopped this unit: " .. tostring(err) end
         end)
     end
+    function API:_PlacementAdapter()
+        return {context=context,team=team,money=money,surface=surface,free=free,
+            ready=function()
+                local c=context(); if c.isLobby or type(c.map)~="string" then return false end
+                local config=workspace:FindFirstChild("_MAP_CONFIG")
+                local loaded=config and config:FindFirstChild("MapLoaded")
+                local ready=workspace:FindFirstChild("SERVER_READY")
+                return unitsFolder()~=nil and not (loaded and loaded.Value~=true) and not (ready and ready.Value~=true)
+            end,
+            priorities=function(model)
+                if type(Options.AutoPlayPriorities)=="function" then return Options.AutoPlayPriorities(model) end
+                local b=services(); return b and b.unit.get_valid_priorities(model) or {}
+            end}
+    end
     function API:GetAutoPlayInfo()
         local c=context()
         local r=self.autoPlayRuntime
@@ -6480,6 +6563,382 @@ do
     end)
 end
 
+do
+    API.plannerRuntime={status="Action Plan is off",revision=0,round=0,open=false,undo={},redo={},tool="select",slot=1,value="1",priority="first"}
+    local function changed(message)
+        local r=API.plannerRuntime
+        if message then r.editMessage=message end
+        r.revision=r.revision+1
+        if r.signal then r.signal:set(r.revision) end
+    end
+    local function adapter() return API:_PlacementAdapter() end
+    local function current() return adapter().context() end
+    local function matches(plan)
+        local c=current()
+        return c.map==plan.map and c.category==plan.category and not c.isLobby
+            and plan.placeId==game.PlaceId and plan.userId==Player.UserId
+    end
+    local function unitFor(plan,id)
+        for _,u in ipairs(plan.units) do if u.id==id then return u end end
+        return nil
+    end
+    local function rowFor(u)
+        for _,row in ipairs(adapter().team()) do
+            if row.uuid==u.uuid and row.unitId==u.unitId then return row end
+        end
+        return nil
+    end
+    local function draft()
+        local p=API.plannerRuntime.draft; check(p~=nil,"Create or edit a plan first"); return p
+    end
+    local function mutate(fn,message)
+        local r=API.plannerRuntime; local before=normalizeActionPlan(draft()); local nextPlan=normalizeActionPlan(before)
+        fn(nextPlan)
+        nextPlan=normalizeActionPlan(nextPlan)
+        r.undo[#r.undo+1]=before; if #r.undo>50 then table.remove(r.undo,1) end
+        r.redo={}; r.draft=nextPlan; r.dirty=true
+        changed(message)
+        return nextPlan
+    end
+    local function signature(p)
+        if not p then return "" end
+        local units,actions={},{}
+        for _,u in ipairs(p.units) do units[#units+1]={u.id,u.uuid,u.unitId,u.slot,u.position[1],u.position[2],u.position[3],u.angle} end
+        for _,a in ipairs(p.actions) do actions[#actions+1]={a.kind,a.unit or "",a.value or 0,a.level or 0,a.priority or ""} end
+        return Http:JSONEncode({p.name,p.map,p.category,p.placeId,p.userId,units,actions})
+    end
+    function API:_ConfigurePlanner()
+        local r,c=self.plannerRuntime,self.autoRules.planner
+        if not r then return end
+        local selected=c.plans[c.selected]
+        r.wanted=tostring(c.enabled) .. ":" .. c.selected .. ":" .. signature(selected)
+    end
+    function API:SetPlanner(patch)
+        check(type(patch)=="table","Plan settings must be a table")
+        local paused=self.autoRuntime.paused
+        self:SetWaveRules({planner=patch})
+        if paused and patch.enabled~=true then self:PauseWaveRules(true) end
+        self:_ConfigurePlanner()
+        changed()
+    end
+    function API:CreateActionPlan(name)
+        check(type(name)=="string","Enter a plan name")
+        name=name:match("^%s*(.-)%s*$")
+        check(not self.autoRules.planner.plans[name],"That plan exists; use Edit or another name")
+        local c=current(); check(type(c.map)=="string" and not c.isLobby,"Join a match map before creating a plan")
+        local p=normalizeActionPlan({name=name,map=c.map,category=c.category,placeId=game.PlaceId,userId=Player.UserId,units={},actions={}})
+        local r=self.plannerRuntime
+        r.draft,r.undo,r.redo,r.dirty,r.selectedUnit,r.selectedAction=p,{},{},true,nil,nil
+        changed("Select an equipped unit, choose Add marker, then click the map")
+        return p
+    end
+    function API:EditActionPlan(name)
+        local p=self.autoRules.planner.plans[name]; check(p~=nil,"Select a saved plan")
+        local r=self.plannerRuntime
+        if not r.draft or r.draft.name~=name or not r.dirty then
+            r.draft,r.undo,r.redo,r.dirty=normalizeActionPlan(p),{},{},false
+            r.selectedUnit,r.selectedAction=nil,nil
+        end
+        changed(matches(p) and "Editing preview; no game actions are sent" or "Join this plan's map/mode to edit marker positions")
+        return r.draft
+    end
+    function API:PlannerAddUnit(slot,point)
+        local p=draft(); check(matches(p),"Join the plan's original map, mode and account")
+        local row
+        for _,item in ipairs(adapter().team()) do if item.slot==tonumber(slot) then row=item; break end end
+        check(row~=nil,"Equip a unit in that slot")
+        local surface=adapter().surface(row,point)
+        check(surface and adapter().free(row,surface,true),"This marker is outside a valid placement surface or overlaps an obstacle")
+        local used={}; for _,u in ipairs(p.units) do used[u.id]=true end
+        local n=1;for marker in pairs(used) do local number=tonumber(marker:match("^p(%d+)$"));if number then n=math.max(n,number+1) end end
+        local id="p"..n
+        mutate(function(plan)
+            plan.units[#plan.units+1]={id=id,uuid=row.uuid,unitId=row.unitId,slot=row.slot,position=surface,angle=0}
+            plan.actions[#plan.actions+1]={kind="spawn",unit=id}
+        end,"Marker added; drag it to adjust its position")
+        self.plannerRuntime.selectedUnit=id; self.plannerRuntime.selectedAction=#self.plannerRuntime.draft.actions
+        changed()
+        return id
+    end
+    function API:PlannerMoveUnit(id,point)
+        local p=draft(); check(matches(p),"Join the plan's map/mode before moving markers")
+        local u=unitFor(p,id); check(u~=nil,"Select a marker")
+        local row=rowFor(u); check(row~=nil,"Equip the marker's original unit before moving it")
+        local surface=adapter().surface(row,point)
+        check(surface and adapter().free(row,surface,true),"Invalid placement surface or obstacle")
+        mutate(function(plan) unitFor(plan,id).position=surface end,"Marker moved")
+    end
+    function API:PlannerRotateUnit(id)
+        check(unitFor(draft(),id)~=nil,"Select a marker")
+        mutate(function(p) local u=unitFor(p,id); u.angle=(u.angle+math.pi/2)%(math.pi*2) end,"Marker rotated 90 degrees")
+    end
+    function API:PlannerRemoveUnit(id)
+        check(unitFor(draft(),id)~=nil,"Select a marker")
+        mutate(function(p)
+            for i=#p.units,1,-1 do if p.units[i].id==id then table.remove(p.units,i) end end
+            for i=#p.actions,1,-1 do if p.actions[i].unit==id then table.remove(p.actions,i) end end
+        end,"Marker and its actions removed")
+        self.plannerRuntime.selectedUnit,self.plannerRuntime.selectedAction=nil,nil
+    end
+    function API:PlannerAddAction(kind,id,value)
+        if kind=="spawn" then error("Add a marker on the map to create its Spawn action",0) end
+        if kind=="upgrade" and value==nil then
+            value=0; for _,a in ipairs(draft().actions) do if a.unit==id and a.kind=="upgrade" then value=math.max(value,a.level) end end
+            value=value+1
+        end
+        mutate(function(p)
+            local a={kind=kind}
+            if kind=="wave" or kind=="delay" then a.value=tonumber(value)
+            else a.unit=id; if kind=="upgrade" then a.level=tonumber(value) elseif kind=="priority" then a.priority=value end end
+            p.actions[#p.actions+1]=a
+        end,"Action appended")
+        self.plannerRuntime.selectedAction=#draft().actions
+    end
+    function API:PlannerMoveAction(index,direction)
+        index,direction=tonumber(index),tonumber(direction)
+        check(index and (direction==-1 or direction==1) and draft().actions[index],"Select an action")
+        local target=index+direction; check(target>=1 and target<=#draft().actions,"Action is already at the end")
+        mutate(function(p) p.actions[index],p.actions[target]=p.actions[target],p.actions[index] end,"Action reordered")
+        self.plannerRuntime.selectedAction=target
+    end
+    function API:PlannerRemoveAction(index)
+        local a=draft().actions[index]; check(a~=nil,"Select an action")
+        if a.kind=="spawn" then return self:PlannerRemoveUnit(a.unit) end
+        mutate(function(p) table.remove(p.actions,index) end,"Action removed")
+        self.plannerRuntime.selectedAction=#draft().actions>0 and math.min(index,#draft().actions) or nil
+        return nil
+    end
+    function API:PlannerSetActionValue(index,value)
+        local a=draft().actions[index]; check(a~=nil,"Select an action")
+        check(a.kind=="upgrade" or a.kind=="wave" or a.kind=="delay" or a.kind=="priority","This action has no editable value")
+        mutate(function(p)
+            local entry=p.actions[index]
+            if entry.kind=="priority" then entry.priority=value elseif entry.kind=="upgrade" then entry.level=tonumber(value) else entry.value=tonumber(value) end
+        end,"Action value updated")
+    end
+    function API:PlannerUndo(redo)
+        local r=self.plannerRuntime; local from,to=redo and r.redo or r.undo,redo and r.undo or r.redo
+        check(#from>0,redo and "Nothing to redo" or "Nothing to undo")
+        to[#to+1]=normalizeActionPlan(draft()); r.draft=table.remove(from); r.dirty=true
+        changed(redo and "Redone" or "Undone")
+    end
+    local function persistPlan(patch,profile)
+        local before,document,name,paused=API.autoRules,API.document,API.name,API.autoRuntime.paused
+        API:SetPlanner(patch)
+        local ok,path=pcall(API.SaveWaveRules,API,profile)
+        if not ok then
+            API:SetWaveRules(before)
+            API.document,API.name=document,name
+            if document then document.autoRules=before end
+            if paused then API:PauseWaveRules(true) end
+            error(path,0)
+        end
+        return path
+    end
+    function API:SaveActionPlan(profile)
+        local p=normalizeActionPlan(draft()); check(#p.actions>0,"Add a marker or action before saving")
+        local plans={}; for name,item in pairs(self.autoRules.planner.plans) do plans[name]=item end; plans[p.name]=p
+        local path=persistPlan({plans=plans,selected=p.name},profile)
+        self.plannerRuntime.dirty=false; changed("Plan saved in the profile JSON")
+        return path
+    end
+    function API:DeleteActionPlan(name,profile)
+        local old=self.autoRules.planner.plans[name]; check(old~=nil,"Select a saved plan")
+        self.plannerRuntime.deleted=normalizeActionPlan(old)
+        local plans={}; for key,p in pairs(self.autoRules.planner.plans) do if key~=name then plans[key]=p end end
+        local patch={plans=plans}
+        if self.autoRules.planner.selected==name then patch.selected=""; patch.enabled=false end
+        local path=persistPlan(patch,profile)
+        changed("Plan deleted; Restore deleted plan is available until reload")
+        return path
+    end
+    function API:RestoreActionPlan(profile)
+        local old=self.plannerRuntime.deleted; check(old~=nil,"No deleted plan in this session")
+        check(not self.autoRules.planner.plans[old.name],"A plan with that name already exists")
+        local plans={};for name,p in pairs(self.autoRules.planner.plans) do plans[name]=p end; plans[old.name]=old
+        persistPlan({plans=plans,selected=old.name},profile)
+        self.plannerRuntime.deleted=nil; changed("Deleted plan restored")
+    end
+    function API:GetActionPlanNames()
+        local names={}; for name in pairs(self.autoRules.planner.plans) do names[#names+1]=name end; table.sort(names); return names
+    end
+    function API:_PlannerHoldsAutomation(kind)
+        local r,c=self.plannerRuntime,self.autoRules.planner
+        return r and (r.open or r.call~=nil or c.enabled and not (r.run and r.run.complete and (kind=="wave" or c.after)))
+    end
+    function API:_ResetPlannerRound()
+        local r=self.plannerRuntime; r.round=r.round+1; r.reset=true
+    end
+    local function bound(run,id)
+        local model=run.bound[id]
+        return model and unitModel(model)==model and owned(model)==true and model or nil
+    end
+    local function pastSales(plan): {[string]: boolean}
+        local wave=Clock.sample and Clock.sample.wave
+        local result,anchor,delayed={},nil,false
+        if not finite(wave) then return result end
+        for _,a in ipairs(plan.actions) do
+            if a.kind=="wave" then
+                if a.value>=wave then break end
+                anchor,delayed=a.value,false
+            elseif a.kind=="delay" then delayed=true
+            elseif a.kind=="sell" and anchor and not delayed then result[a.unit]=true end
+        end
+        return result
+    end
+    local function skipPastPurchase(run,action)
+        return run.pruned[action.unit]==true and action.kind~="sell"
+    end
+    local function existing(run,u)
+        if bound(run,u.id) then return bound(run,u.id) end
+        for _,m in ipairs(unitsFolder() and unitsFolder():GetChildren() or {}) do
+            if m:IsA("Model") and owned(m)==true and not run.claimed[m] and tostring(stat(m,"id"))==u.unitId and nearby(unitPosition(m),u.position,1.5) then
+                run.bound[u.id]=m; run.claimed[m]=u.id; return m
+            end
+        end
+        return nil
+    end
+    local function advancePlan(run,result)
+        run.audit[#run.audit+1]={seq=run.index,kind=run.plan.actions[run.index].kind,result=result}
+        run.index=run.index+1; run.wait=nil; run.attempts=0; run.nextAt=os.clock()+0.12
+        API.plannerRuntime.status="Action " .. (run.index-1) .. " — " .. result
+    end
+    local function validCall(call)
+        local r=API.plannerRuntime
+        return API.alive and API.autoRules.planner.enabled
+            and r.run==call.run and r.round==call.round and not r.reset and r.wanted==call.config
+            and flag("GameStarted")==true and flag("GameFinished")~=true and matches(call.run.plan)
+    end
+    local function perform(call)
+        local r,run=API.plannerRuntime,call.run
+        if not validCall(call) or API.autoRuntime.paused or r.open then return end
+        local a,u=call.action,call.unit
+        local response
+        if a.kind=="spawn" then
+            local cf=CFrame.new(unpackArgs(u.position))
+            if u.angle~=0 then cf=cf*CFrame.Angles(0,u.angle,0) end
+            response=pack(pcall(function() return checkRemote("spawn_unit","InvokeServer"):InvokeServer(u.uuid,cf) end))
+        else
+            if owned(call.model)~=true or unitModel(call.model)~=call.model then run.blocked=true; r.status="Planned unit disappeared before its request"; return end
+            local remote=a.kind=="upgrade" and "upgrade_unit_ingame" or a.kind=="sell" and "sell_unit_ingame" or "change_priority"
+            response=pack(pcall(function()
+                if a.kind=="priority" then return checkRemote(remote,"InvokeServer"):InvokeServer(call.model,a.priority) end
+                return checkRemote(remote,"InvokeServer"):InvokeServer(call.model)
+            end))
+        end
+        call.returned=true
+        if not API.alive then return end
+        local function observed()
+            if a.kind=="spawn" then
+                for _,m in ipairs(unitsFolder() and unitsFolder():GetChildren() or {}) do
+                    if not call.before[m] and m:IsA("Model") and owned(m)==true and tostring(stat(m,"id"))==u.unitId and nearby(unitPosition(m),u.position,3) then
+                        run.bound[u.id]=m;run.claimed[m]=u.id;return true
+                    end
+                end
+            elseif a.kind=="sell" then return unitModel(call.model)~=call.model
+            elseif a.kind=="upgrade" then local level=currentLevel(call.model);return level and level>call.level
+            else return stat(call.model,"priority")==a.priority end
+            return false
+        end
+        if not response[1] then run.blocked=true; r.status="Plan request error: " .. tostring(response[2]); return end
+        if not validCall(call) then run.blocked=true; r.status="Plan changed/stopped during a request; toggle it to restart after the result"; return end
+        if isRejected(response) and not observed() then
+            local reason=tostring(response[3] or ""):lower()
+            if reason:find("money",1,true) or reason:find("fund",1,true) or reason:find("resource",1,true) then
+                run.moneyAtRejection=adapter().money();run.nextAt=os.clock()+1
+                r.status="Waiting for funds before retrying this action";return
+            end
+            run.attempts=(run.attempts or 0)+1; run.nextAt=os.clock()+math.min(8,2^run.attempts)
+            if run.attempts>=3 then run.blocked=true end
+            r.status="Plan request rejected (" .. run.attempts .. "/3)"; return
+        end
+        local deadline=os.clock()+(Options.ConfirmTimeout or 8)
+        while not observed() and os.clock()<deadline do
+            if not validCall(call) then run.blocked=true; return end
+            task.wait(0.05)
+        end
+        if not observed() then run.blocked=true; r.status="Plan action unconfirmed; stopped to prevent duplicates"; return end
+        if not validCall(call) then return end
+        if a.kind=="upgrade" and (currentLevel(call.model) or 0)<a.level then
+            run.attempts=0;run.nextAt=os.clock()+0.25;r.status="Upgrade confirmed; working toward level " .. a.level
+        else
+            if a.kind=="sell" then run.sold[a.unit]=true end
+            advancePlan(run,"confirmed")
+        end
+    end
+    function API:_PlannerTick(now)
+        local r,c=self.plannerRuntime,self.autoRules.planner
+        if r.call then
+            if not r.call.returned and now-r.call.started>(Options.CallTimeout or 8) then r.status="Plan request timed out; waiting for its result" end
+            return
+        end
+        if r.config~=r.wanted or r.reset then r.config=r.wanted; r.run=nil; r.reset=false end
+        if not c.enabled then r.status="Action Plan is off"; return end
+        if self.autoRuntime.paused or r.open then r.status=r.open and "Plan paused while editor is open" or "Action Plan paused"; if r.run then r.run.lastAt=now end; return end
+        if self.mode~="idle" and self.mode~="recording" then r.status="Waiting while macro playback is enabled";if r.run then r.run.lastAt=now end; return end
+        if flag("GameStarted")~=true or flag("GameFinished")==true then r.status="Waiting for a match"; if r.run then r.run.lastAt=now end; return end
+        local p=c.plans[c.selected]
+        if not p then r.status="Choose a saved action plan"; return end
+        if not matches(p) then r.status="Waiting for plan map, mode, place and owner to match"; return end
+        if not adapter().ready() then r.status="Waiting for map readiness"; return end
+        if not r.run then r.run={plan=normalizeActionPlan(p),index=1,bound={},claimed={},sold={},pruned=pastSales(p),audit={},round=r.round,nextAt=0,lastAt=now} end
+        local run=r.run; local dt=math.max(0,now-(run.lastAt or now)); run.lastAt=now
+        if run.blocked or run.complete then return end
+        if run.index>#run.plan.actions then run.complete=true;r.status=c.after and "Plan complete; Auto Play may continue" or "Plan complete; waiting for next match";return end
+        if now<(run.nextAt or 0) then return end
+        if run.moneyAtRejection~=nil then
+            local funds=adapter().money()
+            if not finite(funds) or funds<=run.moneyAtRejection then r.status="Waiting for funds before retrying this action";return end
+            run.moneyAtRejection=nil;run.attempts=0
+        end
+        local a=run.plan.actions[run.index]
+        if a.kind=="wave" then
+            if Clock.sample and finite(Clock.sample.wave) and Clock.sample.wave>=a.value then advancePlan(run,"wave reached")
+            else r.status="Waiting for wave " .. a.value end
+            return
+        elseif a.kind=="delay" then
+            if not run.wait then run.wait=a.value;dt=0 end
+            run.wait=math.max(0,run.wait-dt)
+            r.status=string.format("Waiting %.1f active seconds",run.wait)
+            if run.wait<=0 then advancePlan(run,"wait complete") end
+            return
+        end
+        if self.autoRuntime.call or self.buffRuntime.call or self.autoPlayRuntime.call then r.status="Waiting for another automatic unit request";return end
+        local u=unitFor(run.plan,a.unit); local model=existing(run,u)
+        if skipPastPurchase(run,a) then advancePlan(run,"past-wave sale: purchase/upgrade skipped");return end
+        if a.kind=="spawn" and model then advancePlan(run,"existing unit matched"); return end
+        if a.kind=="sell" and not model then run.sold[a.unit]=true;advancePlan(run,"already absent");return end
+        if a.kind~="spawn" and not model then run.blocked=true;r.status="Planned unit is missing; restart the plan to bind it again";return end
+        if a.kind=="upgrade" and currentLevel(model) and currentLevel(model)>=a.level then advancePlan(run,"target level already reached");return end
+        if a.kind=="priority" and stat(model,"priority")==a.priority then advancePlan(run,"priority already set");return end
+        local row=rowFor(u)
+        if not row then r.status="Equip original unit for marker " .. u.id;return end
+        if a.kind=="upgrade" and not finite(adapter().money()) then r.status="Waiting for player currency";return end
+        if a.kind=="spawn" then
+            if row.full or row.count>=row.cap then r.status="Waiting for placement cap: " .. u.unitId;return end
+            local funds=adapter().money()
+            if not finite(funds) or funds<row.cost then r.status="Waiting for placement funds: " .. u.unitId;return end
+            local surface=adapter().surface(row,u.position)
+            if not surface or math.abs(surface[2]-u.position[2])>1.5 or not adapter().free(row,surface) then r.status="Planned position is occupied or invalid: " .. u.id;return end
+        elseif a.kind=="priority" and not adapter().priorities(model)[a.priority] then
+            run.blocked=true;r.status="Priority is unavailable for marker " .. u.id;return
+        end
+        local call={run=run,action=a,unit=u,model=model,level=model and currentLevel(model),before=snapshot(),round=r.round,config=r.config,started=now}
+        r.call=call
+        task.spawn(function()
+            local ok,err=pcall(perform,call)
+            if r.call==call then r.call=nil end
+            if not ok then run.blocked=true;r.status="Plan stopped: " .. tostring(err) end
+        end)
+    end
+    function API:GetPlannerInfo()
+        local r=self.plannerRuntime
+        return {status=r.status,index=r.run and r.run.index,complete=r.run and r.run.complete or false,open=r.open,
+            selected=self.autoRules.planner.selected,enabled=self.autoRules.planner.enabled}
+    end
+    API:_ConfigurePlanner()
+end
+
 local prevStarted,prevFinished,prevWave=flag("GameStarted"),flag("GameFinished"),workspaceNumber("_wave_num")
 local lastUI=0
 local function tick()
@@ -6493,6 +6952,7 @@ local function tick()
         or (prevWave and sample.wave and prevWave>1 and sample.wave==0))
     prevStarted,prevFinished,prevWave=started,finished,sample.wave
     if newMatch then
+        API:_ResetPlannerRound()
         API.autoPlayRuntime.scene=nil
         API.autoPlayRuntime.roadFolder=nil
         if API.mode=="record_armed" then beginRecording("match")
@@ -6512,6 +6972,7 @@ local function tick()
             if sample.kind=="elapsed" or sample.kind=="remaining" then ctx.doc.clockKind=sample.kind end
         end
     elseif API.mode=="playing" then playTick(API.context,now) end
+    API:_PlannerTick(now)
     automationTick(now)
     buffTick(now)
     API:_AutoPlayTick(now)
@@ -6536,7 +6997,7 @@ function API:SaveDiagnostics()
         startVoteStatus=self.replayRuntime.startStatus,startVoteAttempts=self.replayRuntime.startAttempts,
         skipVoteStatus=self.matchRuntime.skipStatus,matchContextError=self.matchRuntime.contextError,
         buffStatus=self.buffRuntime.status,commanderStatus=self.buffRuntime.commander,windsongStatus=self.buffRuntime.windsong,
-        autoPlayStatus=self.autoPlayRuntime.status,autoPlayMap=self:GetAutoPlayInfo(),
+        autoPlayStatus=self.autoPlayRuntime.status,autoPlayMap=self:GetAutoPlayInfo(),planner=self:GetPlannerInfo(),
         playback=self.context and not self.context.recording and self.context.audit or nil,
         activeRequest=self.context and self.context.activeAudit or nil,uiError=self.uiError}
     local actions=self.document and self.document.actions or {}
@@ -6598,7 +7059,7 @@ pcall(function()
         local active=API.mode~="idle" or API.autoReplay or API.autoRules.start.enabled
             or m.skipWave or m.nextStory or m.nextRoom or m.nextPortal or m.leave
             or API.autoRules.buffs.damage or API.autoRules.buffs.range or API.autoRules.buffs.cooldown
-            or API.autoRules.buffs.commander or API.autoRules.buffs.windsong or API.autoRules.autoplay.enabled
+            or API.autoRules.buffs.commander or API.autoRules.buffs.windsong or API.autoRules.autoplay.enabled or API.autoRules.planner.enabled
         if not active then return end
         if type(queueTeleport)~="function" then
             notify("Teleport resume is unavailable in this executor; rerun the loader after joining")
@@ -6640,7 +7101,7 @@ if Options.ShowUI~=false then
     local app=MattLib.new({id="aa-macro-v2",design="Vector",wallpaperAssets=false,capabilities={},
         onError=function(message) notify("UI: " .. tostring(message)) end})
     API.uiApp=app
-    local window=app:CreateWindow({Id="macro",Title="MAA 2.7",Design="Vector",Size={800,620},
+    local window=app:CreateWindow({Id="macro",Title="MAA 2.8",Design="Vector",Size={800,620},
         MinSize={520,400},OpenKey="RightControl",OnClose=function() API:Shutdown() end})
     API.uiWindow=window
     local function try(fn)
@@ -6727,11 +7188,11 @@ if Options.ShowUI~=false then
         syncingActions=true
         if recordControl:GetValue()~=recordValue then recordControl:SetValue(recordValue) end
         if playControl:GetValue()~=playValue then playControl:SetValue(playValue) end
-        local key=mode .. ":" .. tostring(busy)
+        local key=mode .. ":" .. tostring(busy) .. ":" .. tostring(API.plannerRuntime and API.plannerRuntime.open)
         if key~=lastActionOptions then
-            recordControl:Update({Disabled=busy or playing,Description=recordText})
-            playControl:Update({Disabled=busy or recording,Description=playText})
-            local locked=busy or recording or playing
+            recordControl:Update({Disabled=busy or playing or (API.plannerRuntime and API.plannerRuntime.open),Description=recordText})
+            playControl:Update({Disabled=busy or recording or (API.plannerRuntime and API.plannerRuntime.open),Description=playText})
+            local locked=busy or recording or playing or (API.plannerRuntime and API.plannerRuntime.open)
             recordStart:Update({Disabled=locked})
             playStart:Update({Disabled=locked})
             name:Update({Disabled=locked})
@@ -6904,6 +7365,358 @@ if Options.ShowUI~=false then
         autoStatus:Update({Content=API.autoPlayRuntime.status})
     end
 
+    do local buildPlannerUI=function()
+    local planSection=autoTab:AddSection({Title="SAVED ACTION PLANS"})
+    local planEnabled=planSection:AddToggle({Title="Auto Play Plan",Default=API.autoRules.planner.enabled,
+        Callback=function(v) if not API.syncingPlannerUI then try(function() API:SetPlanner({enabled=v}) end) end end})
+    local planAfter=planSection:AddToggle({Title="Auto Play After Plan",Default=API.autoRules.planner.after,
+        Callback=function(v) if not API.syncingPlannerUI then try(function() API:SetPlanner({after=v}) end) end end})
+    local planName=planSection:AddTextInput({Title="Plan Name",Default="Plan 1"})
+    local planNames=API:GetActionPlanNames()
+    local savedPlan=planSection:AddDropdown({Title="Saved Action Plans",Options=planNames,Default=API.autoRules.planner.selected,
+        Callback=function(v) if not API.syncingPlannerUI then try(function() API:SetPlanner({selected=v}); if v~="" then planName:SetValue(v) end end) end end})
+    local plannerStatus=planSection:AddParagraph({Content="Action Plan is off"})
+    local UI=app.UI
+    local function editorTry(fn)
+        local ok,err=pcall(fn)
+        if not ok then API.plannerRuntime.editMessage=tostring(err); API.plannerRuntime.revision=API.plannerRuntime.revision+1
+            if API.plannerRuntime.signal then API.plannerRuntime.signal:set(API.plannerRuntime.revision) end end
+    end
+    local function refreshEditor()
+        local r=API.plannerRuntime; r.revision=r.revision+1; if r.signal then r.signal:set(r.revision) end
+    end
+    local function project(p,v)
+        local focal=v.height/2/math.tan(math.rad(v.fov)/2)
+        local depth=v.cameraY-p[2]
+        if depth<=0 then return -1000,-1000 end
+        return v.width/2+(p[1]-v.x)*focal/depth,v.height/2+(p[3]-v.z)*focal/depth
+    end
+    local function planePoint(x,y,v)
+        local scale=(v.cameraY-v.y)*2*math.tan(math.rad(v.fov)/2)/v.height
+        return {v.x+(x-v.width/2)*scale,v.y,v.z+(y-v.height/2)*scale}
+    end
+    API._PlannerProject=project; API._PlannerPlanePoint=planePoint
+    local function makeViewport(parent,state)
+        if type(Options.PlannerViewportFactory)=="function" then return Options.PlannerViewportFactory(parent,state) end
+        local frame=Instance.new("ViewportFrame")
+        frame.Name="MAA_PlanViewport"; frame.Size=UDim2.fromScale(1,1); frame.BackgroundTransparency=1
+        frame.Ambient=Color3.fromRGB(190,190,205); frame.LightColor=Color3.fromRGB(255,245,230)
+        frame.LightDirection=Vector3.new(-1,-2,-1); frame.Active=false; frame.Parent=parent
+        local world=Instance.new("WorldModel"); world.Name="PlanPreviewWorld"; world.Parent=frame
+        local camera=Instance.new("Camera"); camera.FieldOfView=35; camera.Parent=frame; frame.CurrentCamera=camera
+        local lowX,highX,lowZ,highZ,ground=math.huge,-math.huge,math.huge,-math.huge,0
+        local count,seen,objects=0,{},{}
+        local function copy(source,road)
+            if not source then return end
+            for _,part in ipairs(source:GetDescendants()) do
+                if part:IsA("BasePart") and not seen[part] and count<1800 then
+                    seen[part]=true
+                    local ok,clone=pcall(part.Clone,part)
+                    if ok and clone then
+                        for _,child in ipairs(clone:GetDescendants()) do
+                            if not child:IsA("DataModelMesh") and not child:IsA("Decal") and not child:IsA("Texture") and not child:IsA("SurfaceAppearance") then child:Destroy() end
+                        end
+                        clone.Anchored=true; clone.CanCollide=false; clone.CanTouch=false; clone.CanQuery=true
+                        if road then clone.Color=Color3.fromRGB(188,126,255); clone.Material=Enum.Material.Neon; clone.Transparency=0.35 end
+                        clone.Parent=world; count=count+1
+                        if source.Name=="_map" then objects[#objects+1]={part=clone,transparency=clone.Transparency} end
+                        if road then
+                            lowX=math.min(lowX,part.Position.X-part.Size.Magnitude/2);highX=math.max(highX,part.Position.X+part.Size.Magnitude/2)
+                            lowZ=math.min(lowZ,part.Position.Z-part.Size.Magnitude/2);highZ=math.max(highZ,part.Position.Z+part.Size.Magnitude/2)
+                            ground=part.Position.Y
+                        end
+                    end
+                end
+            end
+        end
+        local live=API:GetAutoPlayInfo();local plan=API.plannerRuntime.draft
+        if live.map==plan.map and live.category==plan.category then
+            copy(workspace:FindFirstChild("_road"),true)
+            copy(workspace:FindFirstChild("_terrain"),false)
+            copy(workspace:FindFirstChild("_map"),false)
+        end
+        if lowX==math.huge then
+            local units=API.plannerRuntime.draft.units
+            for _,u in ipairs(units) do lowX=math.min(lowX,u.position[1]);highX=math.max(highX,u.position[1]);lowZ=math.min(lowZ,u.position[3]);highZ=math.max(highZ,u.position[3]);ground=u.position[2] end
+            if lowX==math.huge then lowX,highX,lowZ,highZ=-50,50,-50,50 end
+        end
+        local default={x=(lowX+highX)/2,z=(lowZ+highZ)/2,y=ground,span=math.max(40,highX-lowX,highZ-lowZ)+16}
+        local centerX,centerZ,zoom=default.x,default.z,1
+        local object={count=count}
+        function object:update()
+            local size=parent.AbsoluteSize
+            local width,height=math.max(1,size.X),math.max(1,size.Y)
+            local distance=default.span/2/math.tan(math.rad(camera.FieldOfView)/2)/math.min(1,width/height)/zoom
+            state.view={x=centerX,z=centerZ,y=default.y,cameraY=default.y+distance,width=width,height=height,fov=camera.FieldOfView}
+            camera.CFrame=CFrame.lookAt(Vector3.new(centerX,default.y+distance,centerZ),Vector3.new(centerX,default.y,centerZ),Vector3.new(0,0,-1))
+        end
+        function object:point(x,y)
+            self:update();local v=state.view;local focal=v.height/2/math.tan(math.rad(v.fov)/2)
+            local direction=Vector3.new((x-v.width/2)/focal,-1,(y-v.height/2)/focal).Unit
+            local hit=world:Raycast(Vector3.new(v.x,v.cameraY,v.z),direction*(v.cameraY-v.y+200)*4)
+            if hit then return {hit.Position.X,hit.Position.Y,hit.Position.Z} end
+            return planePoint(x,y,v)
+        end
+        function object:zoom(factor) zoom=math.clamp(zoom*factor,0.25,8);self:update() end
+        function object:pan(dx,dy)
+            local v=state.view;local scale=(v.cameraY-v.y)*2*math.tan(math.rad(v.fov)/2)/v.height
+            centerX=centerX-dx*scale;centerZ=centerZ-dy*scale;self:update()
+        end
+        function object:fit() centerX,centerZ,zoom=default.x,default.z,1;self:update() end
+        function object:objects(show) for _,entry in ipairs(objects) do entry.part.Transparency=show and entry.transparency or 1;entry.part.CanQuery=show end end
+        function object:destroy() frame:Destroy() end
+        object:update(); return object
+    end
+    local function MapCanvas()
+        local r=API.plannerRuntime
+        UI.useSignal(r.signal)
+        local ref=UI.useRef(nil)
+        local state=UI.useRef({view={x=0,z=0,y=0,cameraY=200,width=640,height=440,fov=35},markers={}})
+        local env=UI.useEnvironment()
+        UI.useEffect(function()
+            local s=state.current
+            local ok,viewport=pcall(makeViewport,ref.current,s)
+            if not ok then r.editMessage="Map preview unavailable: " .. tostring(viewport); refreshEditor(); return nil end
+            s.viewport=viewport; r.viewport=viewport
+            local alive,connections=true,{}
+            local function shown()
+                local entry=r.windowRef and r.windowRef.current
+                if not entry or not entry.visible or entry.minimized then return false end
+                local node=ref.current
+                while node do
+                    if node:IsA("GuiObject") and not node.Visible or node:IsA("ScreenGui") and not node.Enabled then return false end
+                    node=node.Parent
+                end
+                return true
+            end
+            local function localPoint(input)
+                local inset=env.runtime.services.GuiService:GetGuiInset()
+                local pos=input and input.Position or UIS:GetMouseLocation()
+                return pos.X-inset.X-ref.current.AbsolutePosition.X,pos.Y-inset.Y-ref.current.AbsolutePosition.Y
+            end
+            local function redraw()
+                if not alive then return end
+                viewport:update()
+                for id,marker in pairs(s.markers) do
+                    local u
+                    for _,item in ipairs(r.draft.units) do if item.id==id then u=item;break end end
+                    if marker and u then
+                        local position=s.drag and s.drag.id==id and s.drag.position or u.position
+                        local x,y=project(position,s.view)
+                        marker.Position=UDim2.fromOffset(x,y)
+                        marker.Visible=not r.hideMarkers and x>=0 and y>=0 and x<=s.view.width and y<=s.view.height
+                    end
+                end
+            end
+            connections[#connections+1]=Run.Heartbeat:Connect(redraw)
+            connections[#connections+1]=UIS.InputChanged:Connect(function(input)
+                if input.UserInputType.Name=="MouseWheel" and alive and r.open and shown() and #env.overlays.stack==0 then
+                    local x,y=localPoint(nil);local size=ref.current.AbsoluteSize
+                    if x>=0 and y>=0 and x<=size.X and y<=size.Y then viewport:zoom(1.15^input.Position.Z);redraw() end
+                end
+                if not s.drag or not alive then return end
+                if input.UserInputType~=Enum.UserInputType.MouseMovement and input~=s.drag.input then return end
+                local x,y=localPoint(input)
+                if s.drag.pan then viewport:pan(x-s.drag.x,y-s.drag.y);s.drag.x,s.drag.y=x,y
+                else s.drag.position=viewport:point(x,y) end
+                redraw()
+            end)
+            connections[#connections+1]=UIS.InputEnded:Connect(function(input)
+                local drag=s.drag
+                if not drag or not alive then return end
+                local mouse=input.UserInputType==drag.input.UserInputType and (input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.MouseButton2)
+                if input~=drag.input and not mouse then return end
+                s.drag=nil
+                if drag.id and drag.position then editorTry(function() API:PlannerMoveUnit(drag.id,drag.position) end) end
+                redraw()
+            end)
+            connections[#connections+1]=UIS.WindowFocusReleased:Connect(function()s.drag=nil;redraw()end)
+            local disconnect=env.input:Subscribe("began",function(input)
+                if not input or not alive or not r.open or env.input.uis:GetFocusedTextBox() then return end
+                if #env.overlays.stack>0 or not shown() then return end
+                local own=r.windowRef and r.windowRef.current
+                if not own or not own.visible or own.minimized then return end
+                local pointerInput=input
+                if input.UserInputType==Enum.UserInputType.Keyboard then pointerInput=nil end
+                local px,py=localPoint(pointerInput)
+                local absolute=Vector2.new(px+ref.current.AbsolutePosition.X,py+ref.current.AbsolutePosition.Y)
+                for _,entry in pairs(env.windows.entries) do
+                    if entry~=own and entry.visible and entry.frame.ZIndex>own.frame.ZIndex then
+                        local p,size=entry.frame.AbsolutePosition,entry.frame.AbsoluteSize
+                        if absolute.X>=p.X and absolute.Y>=p.Y and absolute.X<=p.X+size.X and absolute.Y<=p.Y+size.Y then return end
+                    end
+                end
+                if input.UserInputType==Enum.UserInputType.Keyboard then
+                    local p,size=own.frame.AbsolutePosition,own.frame.AbsoluteSize
+                    if absolute.X<p.X or absolute.Y<p.Y or absolute.X>p.X+size.X or absolute.Y>p.Y+size.Y then return end
+                    if input.KeyCode==Enum.KeyCode.Delete and r.selectedUnit then editorTry(function() API:PlannerRemoveUnit(r.selectedUnit) end);return true end
+                    return nil
+                end
+                if input.UserInputType~=Enum.UserInputType.MouseButton1 and input.UserInputType~=Enum.UserInputType.MouseButton2 and input.UserInputType~=Enum.UserInputType.Touch then return end
+                local x,y=localPoint(input);local size=ref.current.AbsoluteSize
+                if x<0 or y<0 or x>size.X or y>size.Y or not ref.current.Visible then return end
+                -- Ignore toolbar overlays at the top of the canvas.
+                if y<38 and x>size.X-318 then return end
+                if r.tool=="pan" or input.UserInputType==Enum.UserInputType.MouseButton2 then s.drag={pan=true,x=x,y=y,input=input};return true end
+                local nearest,distance=nil,19
+                if not r.hideMarkers then for _,u in ipairs(r.draft.units) do local mx,my=project(u.position,s.view);local d=math.sqrt((mx-x)^2+(my-y)^2);if d<distance then nearest,distance=u,d end end end
+                if nearest then
+                    r.selectedUnit=nearest.id;r.tool="select"
+                    s.drag={id=nearest.id,position=nearest.position,input=input}
+                    refreshEditor();return true
+                end
+                if r.tool=="add" then editorTry(function() API:PlannerAddUnit(r.slot,viewport:point(x,y)) end);return true end
+                r.selectedUnit=nil;refreshEditor()
+                return true
+            end)
+            redraw()
+            return function()
+                alive=false;disconnect()
+                for _,connection in ipairs(connections) do connection:Disconnect() end
+                viewport:destroy();s.viewport=nil;r.viewport=nil
+            end
+        end,{r.draft.map,r.draft.category})
+        local children={}
+        for i,u in ipairs(r.draft.units) do
+            local id=u.id
+            local number=id:match("^p(%d+)$") or tostring(i)
+            local arrows={"↑","←","↓","→"}
+            children[#children+1]=UI.h("Button",{name="PlanMarker:"..id,text=number..arrows[math.floor(u.angle/(math.pi/2)+0.5)%4+1],accessibleName="Marker "..number.." "..u.unitId,
+                ref=function(instance) state.current.markers[id]=instance end,
+                style={width=32,height=32,anchor=Vector2.new(0.5,0.5),radius=16,paddingX=0,textSize=12,zIndex=5,
+                    borderWidth=r.selectedUnit==id and 3 or 1,borderColor="$accent",background=r.selectedUnit==id and "$accent" or "$raised",
+                    color=r.selectedUnit==id and "$accentText" or "$text"},
+                onClick=function() r.selectedUnit=id;refreshEditor() end})
+        end
+        children[#children+1]=UI.h("Row",{style={position=UDim2.new(1,-312,0,6),width=306,height=30,gap=4,zIndex=8}}, {
+            UI.h("Button",{text="−",style={width=42,height=28,paddingX=0},onClick=function() if r.viewport then r.viewport:zoom(0.8) end end}),
+            UI.h("Button",{text="+",style={width=42,height=28,paddingX=0},onClick=function() if r.viewport then r.viewport:zoom(1.25) end end}),
+            UI.h("Button",{text="Fit",style={width=60,height=28,paddingX=0},onClick=function() if r.viewport then r.viewport:fit() end end}),
+            UI.h("Button",{text=r.hideMarkers and "Show plan" or "Hide plan",style={width=74,height=28,paddingX=0,textSize=11},onClick=function()r.hideMarkers=not r.hideMarkers;refreshEditor()end}),
+            UI.h("Button",{text=r.hideObjects and "Objects +" or "Objects −",style={width=74,height=28,paddingX=0,textSize=11},onClick=function()r.hideObjects=not r.hideObjects;if r.viewport and r.viewport.objects then r.viewport:objects(not r.hideObjects) end;refreshEditor()end}),
+        })
+        children[#children+1]=UI.h("Text",{text="Drag markers · right-drag / Pan moves view",style={position=UDim2.new(0,8,1,-28),width=UDim.new(1,-16),height=24,textSize=11,zIndex=8,color="$muted"}})
+        return UI.h("Frame",{name="PlanMapCanvas",ref=ref,native={Active=true},style={width="100%",height="100%",background="$input",backgroundTransparency=0,overflow="hidden",radius=8}},children)
+    end
+    local function PlannerView()
+        local r=API.plannerRuntime
+        UI.useSignal(r.signal)
+        local width,setWidth=UI.useState(1000)
+        local narrow=width<760
+        local selected=r.selectedUnit
+        local slots={}
+        for _,row in ipairs(API:_PlacementAdapter().team()) do slots[#slots+1]={value=tostring(row.slot),label="Slot "..row.slot.." · "..row.unitId} end
+        if #slots==0 then slots={{value="1",label="Equip units in the game first"}} end
+        local unitName=selected or "No marker selected"
+        for _,u in ipairs(r.draft.units) do if u.id==selected then unitName=u.id.." · "..u.unitId end end
+        local rows={}
+        for i,a in ipairs(r.draft.actions) do
+            local label=i..". "..a.kind:upper()
+            if a.unit then label=label.." "..a.unit end
+            if a.level then label=label.." → "..a.level end
+            if a.priority then label=label.." "..a.priority end
+            if a.value then label=label.." "..a.value end
+            rows[#rows+1]=UI.h("Button",{name="PlanAction:"..i,text=label,style={height=32,textAlign="left",paddingX=8,
+                borderColor=r.selectedAction==i and "$accent" or "$border"},onClick=function()r.selectedAction=i;if a.unit then r.selectedUnit=a.unit end;refreshEditor() end})
+        end
+        local function button(text,fn,disabled)
+            return UI.h("Button",{text=text,disabled=disabled,style={width=UDim.new(1/3,-6),height=30,paddingX=3,textSize=12},onClick=function()editorTry(fn)end})
+        end
+        local panel=UI.h("Column",{style={width="100%",height="100%",gap=7}}, {
+            UI.h("Text",{text="ORDERED ACTIONS · "..#r.draft.actions,style={height=22,font="$typography.bold"}}),
+            UI.h("ScrollArea",{name="PlanActions",style={height=190},contentStyle={gap=4}},rows),
+            UI.h("Row",{style={height=30,gap=6}}, {
+                button("↑ Move",function()API:PlannerMoveAction(r.selectedAction,-1)end,not r.selectedAction),
+                button("↓ Move",function()API:PlannerMoveAction(r.selectedAction,1)end,not r.selectedAction),
+                button("Delete",function()API:PlannerRemoveAction(r.selectedAction)end,not r.selectedAction),
+            }),
+            UI.h("Text",{text=unitName,style={height=22,color="$accent",wrapped=false}}),
+            UI.h("Row",{style={height=30,gap=6}}, {
+                button("Upgrade",function()API:PlannerAddAction("upgrade",selected)end,not selected),
+                button("Sell",function()API:PlannerAddAction("sell",selected)end,not selected),
+                button("Rotate 90°",function()API:PlannerRotateUnit(selected)end,not selected),
+            }),
+            UI.h("TextInput",{label="Wait / target level value",value=r.value,onChange=function(v)r.value=v;refreshEditor()end}),
+            UI.h("Row",{style={height=30,gap=6}}, {
+                button("Wait wave",function()API:PlannerAddAction("wave",nil,tonumber(r.value))end),
+                button("Wait seconds",function()API:PlannerAddAction("delay",nil,tonumber(r.value))end),
+                button("Set value",function()API:PlannerSetActionValue(r.selectedAction,tonumber(r.value))end,not r.selectedAction),
+            }),
+            UI.h("Dropdown",{label="Planned target priority",value=r.priority,options={"first","last","strongest","weakest","closest","farthest","flying","soaring"},onChange=function(v)r.priority=v;refreshEditor()end}),
+            UI.h("Row",{style={height=30,gap=6}}, {
+                button("Add priority",function()API:PlannerAddAction("priority",selected,r.priority)end,not selected),
+                button("Set priority",function()API:PlannerSetActionValue(r.selectedAction,r.priority)end,not r.selectedAction),
+                button("Remove unit",function()API:PlannerRemoveUnit(selected)end,not selected),
+            }),
+        })
+        return UI.h("Frame",{changes={AbsoluteSize=function(instance)setWidth(instance.AbsoluteSize.X)end},style={width="100%",height="100%"}}, {
+            UI.h("ScrollArea",{contentStyle={gap=0}}, {
+                UI.h("Frame",{style={width="100%",height=narrow and 1168 or 770}}, {
+                    UI.h("Row",{style={position=UDim2.fromOffset(12,8),width=UDim.new(1,-24),height=62,gap=8}}, {
+                        UI.h("Dropdown",{label="Equipped unit",value=tostring(r.slot),options=slots,style={width=UDim.new(0.55,-4)},onChange=function(v)r.slot=tonumber(v);refreshEditor()end}),
+                        UI.h("Button",{text=r.tool=="add" and "Click map to add…" or "Add marker on map",style={width=UDim.new(0.45,-4),height=36},onClick=function()r.tool="add";refreshEditor()end}),
+                    }),
+                    UI.h("Row",{style={position=UDim2.fromOffset(12,78),width=UDim.new(1,-24),height=30,gap=6}}, {
+                        button(r.tool=="pan" and "Select / drag" or "Pan view",function()r.tool=r.tool=="pan" and "select" or "pan";refreshEditor()end),
+                        button("Undo",function()API:PlannerUndo(false)end,#r.undo==0),
+                        button("Redo",function()API:PlannerUndo(true)end,#r.redo==0),
+                    }),
+                    UI.h("Frame",{style={position=UDim2.fromOffset(12,120),width=narrow and UDim.new(1,-24) or UDim.new(0.62,-18),height=narrow and 380 or 540}},UI.h(MapCanvas)),
+                    UI.h("Frame",{style={position=narrow and UDim2.fromOffset(12,512) or UDim2.new(0.62,0,0,120),width=narrow and UDim.new(1,-24) or UDim.new(0.38,-12),height=550}},panel),
+                    UI.h("Text",{text=r.editMessage or "Editing preview",style={position=UDim2.fromOffset(12,narrow and 1072 or 680),width=UDim.new(1,-24),height=38,color="$muted",textSize=12}}),
+                    UI.h("Button",{name="SaveVisualPlan",text="Save plan to current profile JSON",variant="primary",style={position=UDim2.fromOffset(12,narrow and 1118 or 724),width=UDim.new(1,-24),height=34},
+                        onClick=function()editorTry(function()API:SaveActionPlan(name:GetValue())end)end}),
+                }),
+            }),
+        })
+    end
+    function API:_ClosePlanner()
+        local r=self.plannerRuntime
+        r.open=false
+        if r.root then local root=r.root;r.root=nil;root:Unmount() end
+        if self.updateUI and self.uiApp and not self.uiApp._destroyed then self.updateUI() end
+    end
+    function API:_OpenPlanner()
+        local r=self.plannerRuntime
+        check(self.mode=="idle","Stop recording and macro Play before opening the visual editor")
+        check(r.draft~=nil,"Create or select a plan first")
+        if r.root and r.root.alive then if r.windowRef and r.windowRef.current then r.windowRef.current:Focus() end;return end
+        if not r.signal then r.signal=UI.signal(0) end
+        local slots=API:_PlacementAdapter().team();local equipped=false
+        for _,row in ipairs(slots) do if row.slot==r.slot then equipped=true end end
+        if not equipped and slots[1] then r.slot=slots[1].slot end
+        r.open=true; r.windowRef={}
+        local viewport=app._env.runtime.viewport:get()
+        r.root=app:Mount(UI.h("Window",{id="maa-placement-planner",title="Placement Planner · "..r.draft.name,
+            size={math.min(1160,viewport.X-24),math.min(780,viewport.Y-24)},minSize={math.min(700,viewport.X-24),math.min(480,viewport.Y-24)},
+            windowRef=r.windowRef,wallpaper=false,onClose=function()self:_ClosePlanner()end},UI.h(PlannerView)))
+        if self.updateUI then self.updateUI() end
+    end
+    planSection:AddButton({Title="Create Plan",Callback=function()try(function()API:CreateActionPlan(planName:GetValue());API:_OpenPlanner()end)end})
+    planSection:AddButton({Title="Edit Plan",Callback=function()try(function()API:EditActionPlan(API.autoRules.planner.selected);API:_OpenPlanner()end)end})
+    planSection:AddButton({Title="Delete Plan",Callback=function()try(function()API:DeleteActionPlan(API.autoRules.planner.selected,name:GetValue())end)end})
+    planSection:AddButton({Title="Restore deleted plan",Callback=function()try(function()API:RestoreActionPlan(name:GetValue())end)end})
+    planSection:AddButton({Title="Restart selected plan",Callback=function()try(function()
+        check(not API.plannerRuntime.call,"Wait for the current request to return")
+        API.plannerRuntime.reset=true;API:SetPlanner({enabled=true})
+    end)end})
+    planSection:AddButton({Title="Save Action Plan settings in this macro JSON",Callback=function()try(function()API:SaveWaveRules(name:GetValue())end)end})
+    planSection:AddParagraph({Content="Create/Edit opens a 3D preview of the currently loaded map. Add and drag numbered markers, then build ordered actions. Editing sends no game actions. Auto Play Plan repeats at each new match while enabled and waits for the correct map/account. Auto Play After Plan permits normal Auto Play after completion. Wave automation waits during the plan; Buffs can run between its actions."})
+    local namesKey=Http:JSONEncode(planNames)
+    local function syncPlannerUI()
+        local r,c=API.plannerRuntime,API.autoRules.planner
+        API.syncingPlannerUI=true
+        if planEnabled:GetValue()~=c.enabled then planEnabled:SetValue(c.enabled) end
+        if planAfter:GetValue()~=c.after then planAfter:SetValue(c.after) end
+        local names=API:GetActionPlanNames();local key=Http:JSONEncode(names)
+        if key~=namesKey then savedPlan:SetValue("");savedPlan:Update({Options=names});namesKey=key end
+        if savedPlan:GetValue()~=c.selected then savedPlan:SetValue(c.selected) end
+        API.syncingPlannerUI=false
+        plannerStatus:Update({Content=r.status})
+    end
+
+    API._SyncPlannerUI=syncPlannerUI
+    end;buildPlannerUI() end
     local automation=window:AddTab({Title="Wave rules",Icon="controls",Columns=2,MinColumnWidth=260,Gap=12})
     local up=automation:AddSection({Title="Auto upgrade",Description="Applies to all your placed units."})
     local u,s=API.autoRules.upgrade,API.autoRules.sell
@@ -6945,6 +7758,7 @@ if Options.ShowUI~=false then
         syncMatchUI()
         syncBuffUI()
         syncAutoPlayUI()
+        API._SyncPlannerUI()
         local c,ctx=API:Counts(),API.context
         local count=API.document and #API.document.actions or 0
         local text=string.format("%s\n%d recorded  |  %d pending  |  %d unconfirmed\n%s",API.mode,c.successful,c.pending,c.failed,API.message)
@@ -6968,5 +7782,5 @@ if Options.ShowUI~=false then
     end
     API.updateUI()
 end
-notify("MAA 2.7 ready: Auto Play supports path placement and saved map circle plans.")
+notify("MAA 2.8 ready: create and edit action plans from Auto Play.")
 return API

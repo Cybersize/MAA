@@ -1,4 +1,4 @@
-# MAA 2.6
+# MAA 2.7
 
 Run the same GitHub loader to receive the latest version:
 
@@ -6,7 +6,7 @@ Run the same GitHub loader to receive the latest version:
 loadstring(game:HttpGet("https://raw.githubusercontent.com/Cybersize/MAA/main/loader.lua"))()
 ```
 
-The panel should show **MAA 2.6**. MattLib 1.2.1 remains embedded. Right Ctrl hides/shows the window. Choose a design in Diagnostics.
+The panel should show **MAA 2.7**. MattLib 1.2.1 remains embedded. Right Ctrl hides/shows the window. Choose a design in Diagnostics.
 
 ## Match controls
 
@@ -43,15 +43,41 @@ The **Buffs** tab adds the five controls from your screenshot. All default off a
 | Auto Commander | Runs the selected formation-checked Erwin sequence instead of basic damage upkeep for that family. |
 | Auto Windsong | Runs an independent Wendy sequence with the same placement/readiness checks. |
 
-Place your support units yourself, then choose **Auto**, **Four-unit relay**, or **Five-unit pentagon**. Auto looks for a valid five-unit ring first, then a four-unit mutually covering layout. The ring rejects coverage of opposite supports, including one-way coverage caused by unequal ranges. Missing, sold, moved, or differently upgraded units trigger a new formation check. Unsupported layouts show **Setup required** and wait. The researched six-unit double-line method is not implemented.
+Choose **Auto**, **Four-unit relay**, or **Five-unit pentagon**. Auto accepts a valid five-unit ring or uses the staged relay. The corrected relay begins with two supports, then adds the third after cast 1 and the fourth after cast 2. Follow its status prompts. The initial wait is four seconds after the third appears; later casts follow buff expiry/readiness. Auto Play can stage those four placements in mutual range. A preplaced unseeded group of four waits for a restart instead of blindly casting. The ring rejects coverage of opposite supports, including one-way coverage caused by unequal ranges. Missing, sold, moved, or differently upgraded units trigger a new formation check. Unsupported layouts show **Setup required** and wait. The researched six-unit double-line method is not implemented.
 
-Combo steps use received-buff expiry, current per-unit cooldowns, global readiness, and replicated cast confirmation. Commander and Windsong track separate sequences. The relay's initial stagger adapts to the observed cooldown; the ring spaces casts using the current cooldown. These schedules are experimental: the current server's complete transfer-strength formula and curse behavior have not been verified by live casts. A valid layout alone does not guarantee a sustained 100% loop.
+Combo steps use received-buff expiry, current per-unit cooldowns, global readiness, and replicated cast confirmation. Commander and Windsong track separate sequences. The ring spaces casts using the current cooldown. The relay follows the supplied tutorial; its curse requirement is not changed automatically. These schedules are experimental: the current server's complete transfer-strength formula and curse behavior have not been verified by live casts. A valid layout alone does not guarantee a sustained 100% loop.
 
-The status reports the maximum buff **observed on the support units**. It does not certify every damage unit's coverage, uninterrupted uptime, or future server acceptance. Damage-stack strength and uptime are separate measurements. Passive auras such as Idol (Star) are excluded from active requests.
+The status reports the maximum buff **observed on the support units**. It does not certify every damage unit's coverage, uninterrupted uptime, or future server acceptance. Damage-stack strength and uptime are separate measurements. Passive auras such as Idol (Star) are excluded from active requests. MAA clears the game's separate native auto-cast state for support units it manages so it cannot interrupt the sequence.
 
 When a specialized family is enabled, basic damage upkeep leaves its sequence alone. Matching recorded active calls defer to enabled Buffs automation. Unit requests coordinate with playback and wave rules; selling takes priority. An unresolved request is never duplicated, and an unconfirmed cast pauses that unit until a new observed cast or an explicit settings reset. Explicit rejections back off and stop after three attempts.
 
 Use **Save Buffs settings in this macro JSON** to store the controls in the same profile. **Stop everything** pauses Buffs too; **Resume buff automation** resumes enabled controls. Teleport resume includes Buffs settings without creating another JSON. See [the research notes](BUFF_COMBO_RESEARCH.md) for current-client evidence, historical sources, and remaining unknowns.
+
+## Auto Play
+
+The **Auto Play** tab implements the controls from the supplied screenshot. It places equipped units without requiring a recorded action macro. **Enable Auto Play** defaults off. It waits while macro Play is enabled, including while waiting for the next round.
+
+For repeating autonomous placement, leave macro Play off and enable **Auto Play**, **Auto Start Game**, and **Auto Replay**. A saved recording is unnecessary; save a settings profile if wanted.
+
+| Control | Behavior |
+| --- | --- |
+| Placement Mode | **Smart Path & Corners** samples beside actual road geometry and scores nearby-road coverage. **Circle Placement** samples within the configured radius around a saved center. |
+| Snap to Path Corners | Favors road-segment ends in the scoring heuristic. This does not solve an optimal combat strategy. |
+| Auto Target Priority | Applies the selected target to all confirmed-owned placed units when the game's valid-priority helper allows it. Unsupported Flying/Soaring targets are skipped. |
+| Circle Radius | Placement-center radius in studs, from 5 to 100. |
+| Auto Upgrade Units | Uses the shared wave-rule worker for owned units. |
+| Max Upgrades per Unit | Target upgrade level; `0 = Max`. Explicit active wave-upgrade settings take precedence. |
+| Auto Sell at Wave | Sells owned units from the selected wave and stops buying replacements; `0 = Off`. |
+
+Auto Play rotates equipped slots, reads actual placement counts/caps, calculates current cost through the game's multiplier, and waits for currency. It checks ground/hill/hybrid placement surfaces, footprint edges, road clearance, obstacles and other units. Mesh obstacles use temporary local collision-query copies, destroyed immediately after the check. A bounded candidate scan continues on later ticks when early candidates are invalid.
+
+One automatic unit request runs at a time across placement, priority, upgrades, sales and Buffs. Placements require a new matching owned unit to appear near the requested position. Errors and unconfirmed outcomes pause that unit; explicit rejections back off and stop after three attempts. An unresolved request remains single, including after a toggle/settings change. Settings changes can reset a blocked unit after its request finishes.
+
+For a circle plan, choose **Game Mode Category** and **Select Map / Stage**, join that map/mode, click **Set Circle Position (Click on Map)**, then click a placement surface. Esc cancels. Use **Save Plan for Map** to store the position in the same named macro/profile JSON. All map plans share that file; no per-map sidecar is created. Plan selection edits a plan; it does not join or teleport to that stage. Runtime Circle mode uses only a saved plan matching the actual map, category and place.
+
+Use **Save Auto Play settings in this macro JSON** for global controls without changing a circle position. **Stop everything** pauses Auto Play, and **Resume Auto Play** resumes enabled controls. Enabled Auto Play and its plans are included in teleport resume. Each new match resets placement state. The visual drag-and-drop action editor shown in the second reference is outside these screenshot controls and is not included here.
+
+When Commander/Windsong uses the staged relay, Auto Play holds that support family at the count required by its current setup step and checks mutual range. It caps that family at four for the relay even if the game's spawn cap is higher. It does not buy curses, alter traits, reposition existing units, or silently sell an incorrectly seeded group. Five-unit ring layouts still require valid placement; basic Smart Path placement does not promise that ring.
 
 ## Recording and playback
 
@@ -97,4 +123,4 @@ Map/account/place validation still applies. A recording for a different map must
 
 ## Verification
 
-The bundle compiles with official Luau 0.745, passes 129 local checks, and passes Real's static checker with zero errors/warnings. The actual six-tab UI loaded through Real and the adapter read the connected match mode and level without errors. All automation was off during live smoke checks. No owned support units were placed, so live support casts and a sustained 100% buff loop remain unverified. See [validation](VALIDATION.md) for the distinction between simulated behavior and live evidence.
+The bundle compiles with official Luau 0.745, passes 157 local checks, and passes Real's static checker with zero errors/warnings. The seven-tab UI loaded in the actual client. Read-only planning found valid surface/collision-checked positions for every equipped unit after bounded scans and read real costs/caps, including the observed 63.27-second Commander active cooldown. All automatic controls remained off during live checks. No MAA spawn, cast, upgrade, sell or progression request was sent. Actual server acceptance, sustained buff uptime and the complete hidden transfer formula remain unverified. See [validation](VALIDATION.md).

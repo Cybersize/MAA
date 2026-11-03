@@ -3899,7 +3899,7 @@ end
 return __require("init")
 
 ]====]
--- MAA v2.6 -- Buff upkeep and state-aware Commander/Windsong combo patterns.
+-- MAA v2.7 -- Autonomous placement, map circle plans and Auto Play controls.
 local Resume=...
 -- MattLib 1.2.1 is embedded, pinned and MIT licensed. No runtime downloads.
 -- Records request timestamps, not guaranteed server execution timestamps.
@@ -3961,7 +3961,37 @@ local function normalizeWaveRules(rules)
         check(finite(value) and value>=0 and value<=60,label .. " must be 0-60 seconds")
         return value
     end
-    local result={upgrade={enabled=enabled(u.enabled),startWave=integer(u.startWave,1,"Upgrade start wave"),
+    local a=part(rules.autoplay,"Auto Play")
+    local function choice(value,default,choices,label)
+        if value==nil then value=default end
+        check(choices[value]==true,"Invalid " .. label)
+        return value
+    end
+    local function coordinate(value)
+        check(type(value)=="table" and #value==3,"Circle position must have three coordinates")
+        local point={}
+        for i=1,3 do check(finite(value[i]) and math.abs(value[i])<1000000,"Invalid circle coordinate"); point[i]=value[i] end
+        return point
+    end
+    local plans={}; local count=0
+    for key,plan in pairs(a.plans or {}) do
+        count=count+1
+        check(count<=500 and type(key)=="string" and #key<=200 and type(plan)=="table","Invalid map plans")
+        check(type(plan.map)=="string" and #plan.map<=120 and type(plan.category)=="string","Invalid plan map")
+        check(key==plan.category .. ":" .. plan.map,"Map plan key differs")
+        check(finite(plan.placeId) and plan.placeId>0,"Invalid plan place")
+        plans[key]={map=plan.map,category=plan.category,placeId=plan.placeId,center=coordinate(plan.center)}
+    end
+    local autoplay={enabled=enabled(a.enabled),mode=choice(a.mode,"Smart Path & Corners",
+        {["Smart Path & Corners"]=true,["Circle Placement"]=true},"placement mode"),
+        snapCorners=a.snapCorners==nil and true or enabled(a.snapCorners),priorityEnabled=enabled(a.priorityEnabled),
+        priority=choice(a.priority,"first",{first=true,last=true,strongest=true,weakest=true,closest=true,farthest=true,flying=true,soaring=true},"target priority"),
+        radius=a.radius==nil and 20 or a.radius,upgrade=enabled(a.upgrade),maxUpgrades=integer(a.maxUpgrades,5,"Max upgrades"),
+        sellWave=integer(a.sellWave,0,"Auto Play sell wave"),plans=plans}
+    check(finite(autoplay.radius) and autoplay.radius>=5 and autoplay.radius<=100,"Circle radius must be 5-100 studs")
+    check(autoplay.maxUpgrades<=100 and autoplay.sellWave<=1000,"Auto Play limits are too large")
+
+    local result={autoplay=autoplay,upgrade={enabled=enabled(u.enabled),startWave=integer(u.startWave,1,"Upgrade start wave"),
         stopWave=integer(u.stopWave,0,"Upgrade stop wave"),targetLevel=integer(u.targetLevel,0,"Target upgrade")},
         sell={enabled=enabled(s.enabled),wave=integer(s.wave,20,"Sell wave")},
         start={enabled=enabled(start.enabled)},
@@ -4511,7 +4541,7 @@ function API:Save(name)
     check(self.mode~="recording" and self.mode~="record_armed","Stop recording before saving")
     check(self.document~=nil,"There is no recording to save")
     self.document.autoRules=normalizeWaveRules(self.autoRules)
-    self.document.appVersion="2.6.0"
+    self.document.appVersion="2.7.0"
     local doc=validate(self.document)
     local path=filePath(name)
     local text=Http:JSONEncode(doc)
@@ -4638,6 +4668,7 @@ function API:StopRecording()
     return path
 end
 function API:Stop()
+    if self.autoPlayRuntime then self.autoPlayRuntime.pick=nil end
     self:PauseWaveRules(true)
     self.learnReplay = false
     if self.mode == "recording" or self.mode == "record_armed" then return self:StopRecording() end
@@ -5068,7 +5099,7 @@ local function playTick(ctx,now)
     if ctx.requestAt and not ctx.requestDone then
         check(now-ctx.requestAt <= (Options.CallTimeout or 8),"Server request timed out; playback stopped")
     end
-    if ctx.busy or (API.autoRuntime and API.autoRuntime.call) or (API.buffRuntime and API.buffRuntime.call) or now < (ctx.nextSend or 0) then return end
+    if ctx.busy or (API.autoRuntime and API.autoRuntime.call) or (API.buffRuntime and API.buffRuntime.call) or (API.autoPlayRuntime and API.autoPlayRuntime.call) or now < (ctx.nextSend or 0) then return end
     local entry = ctx.doc.actions[ctx.index]
     if not entry then
         if ctx.timingMode == "Offsets" and now-ctx.start < ctx.doc.duration then return end
@@ -5107,11 +5138,13 @@ API.autoRuntime={paused=false,generation=0,cursor=0,nextAt=0,perUnit={},status="
 
 local function sellRuleDue()
     local s=Clock.sample
+    if API._AutoPlaySellDue and API:_AutoPlaySellDue() then return true end
     return API.autoRules.sell.enabled and s and s.started and not s.finished and finite(s.wave)
         and s.wave>=API.autoRules.sell.wave
 end
 local function upgradeRuleDue()
     local s,u=Clock.sample,API.autoRules.upgrade
+    if API._AutoPlayUpgradeDue and API:_AutoPlayUpgradeDue() and not sellRuleDue() then return true end
     return u.enabled and s and s.started and not s.finished and finite(s.wave) and s.wave>=u.startWave
         and (u.stopWave==0 or s.wave<=u.stopWave) and not sellRuleDue()
 end
@@ -5131,7 +5164,7 @@ end
 function API:SetWaveRules(patch)
     check(type(patch)=="table","Wave-rule patch must be a table")
     local merged=normalizeWaveRules(self.autoRules)
-    for _,kind in ipairs({"upgrade","sell","replay","start","match","buffs"}) do
+    for _,kind in ipairs({"upgrade","sell","replay","start","match","buffs","autoplay"}) do
         if patch[kind]~=nil then
             check(type(patch[kind])=="table","Invalid " .. kind .. " settings")
             for key,value in pairs(patch[kind]) do merged[kind][key]=value end
@@ -5220,7 +5253,7 @@ end
 
 local function automationTick(now)
     local r,s=API.autoRuntime,Clock.sample
-    if API.buffRuntime and API.buffRuntime.call then return end
+    if (API.buffRuntime and API.buffRuntime.call) or (API.autoPlayRuntime and API.autoPlayRuntime.call) then return end
     if r.call then
         if not r.call.returned and now-r.call.started>(Options.CallTimeout or 8) then
             r.paused=true
@@ -5229,7 +5262,7 @@ local function automationTick(now)
         return
     end
     if r.paused or not s or not s.started or s.finished or not finite(s.wave) then return end
-    if not API.autoRules.upgrade.enabled and not API.autoRules.sell.enabled then r.status="Wave rules are off"; return end
+    if not API.autoRules.upgrade.enabled and not API.autoRules.sell.enabled and not API:_AutoPlayUpgradeDue() and not API:_AutoPlaySellDue() then r.status="Wave rules are off"; return end
     if r.lastWave and s.wave<r.lastWave then r.perUnit,r.cursor={},0; r.generation=r.generation+1 end
     r.lastWave=s.wave
     if now<r.nextAt then return end
@@ -5247,7 +5280,9 @@ local function automationTick(now)
         if model:IsA("Model") and owned(model)==true then
             local state=r.perUnit[model] or {}
             local level=currentLevel(model)
-            local target=API.autoRules.upgrade.targetLevel
+            local u=API.autoRules.upgrade
+            local waveUpgrade=u.enabled and s.wave>=u.startWave and (u.stopWave==0 or s.wave<=u.stopWave)
+            local target=waveUpgrade and u.targetLevel or API.autoRules.autoplay.maxUpgrades
             local eligible=state.blockedKind~=kind and now>=(state.nextAt or 0)
             if kind=="upgrade" then
                 eligible=eligible and level~=nil and (target==0 or level<target) and state.doneLevel~=level
@@ -5684,7 +5719,7 @@ local function buffServices()
         if not module then return nil end
         local L=require(module)
         return {attacks=L.load_data(nil,"Attacks"),replicate=L.load_client_service(nil,"AttacksReplicate"),
-            collection=game:GetService("CollectionService")}
+            collection=game:GetService("CollectionService"),gui=L.load_client_service(nil,"GUIService")}
     end)
     if ok then buffBridge=b else API.buffRuntime.status="Waiting for buff services: " .. tostring(b) end
     return buffBridge
@@ -5786,51 +5821,110 @@ local function formation(rows,kind)
     pick(1)
     return result
 end
+local function relayChoice(family,rows,now,key)
+    local r=API.buffRuntime
+    local p=r.plans[family]
+    if not p or p.kind~="relay" then
+        if #rows~=2 then
+            r[key]="Setup required — start with exactly two units; add the third after cast 1"
+            return nil
+        end
+        p={kind="relay",order={rows[1],rows[2]},index=1,due=0,gap=4}; r.plans[family]=p
+    end
+    if #rows>4 then r[key]="Setup required — keep exactly four units for this relay"; return nil end
+    if not p.cycled and (p.index==1 and #rows>2 or p.index==2 and #rows>3) then
+        r[key]="Setup required — a later unit was placed before its setup cast"; return nil
+    end
+    local byModel,used={},{}
+    for _,row in ipairs(rows) do byModel[row.model]=row end
+    for i,row in ipairs(p.order) do
+        if not byModel[row.model] then r.plans[family]=nil; r[key]="Setup changed — restart with two units"; return nil end
+        p.order[i]=byModel[row.model]; used[row.model]=true
+    end
+    if not p.cycled and p.index==2 and #p.order==2 then
+        if #rows<3 then r[key]="Place the third unit now, after the first cast"; return nil end
+        if #rows~=3 then r[key]="Fourth unit was placed too early — restart with two"; return nil end
+        for _,row in ipairs(rows) do if not used[row.model] then
+            if hasReceivedBuff(row) then r[key]="Third unit received the first buff — restart with two"; return nil end
+            p.order[3]=row; p.due=now+4; break
+        end end
+    elseif not p.cycled and p.index==3 and #p.order==3 then
+        if #rows<4 then r[key]="Place the fourth unit now, after the second cast"; return nil end
+        for _,row in ipairs(rows) do if not used[row.model] then
+            if hasReceivedBuff(row) then r[key]="Fourth unit received an early buff — restart with two"; return nil end
+            p.order[4]=row; break
+        end end
+    end
+    for i,a in ipairs(p.order) do for j,b in ipairs(p.order) do
+        if i~=j and not reaches(a,b) then r[key]="Setup required — all relay units must cover each other"; return nil end
+    end end
+    local top=0; for _,row in ipairs(rows) do top=math.max(top,row.power or 0) end
+    r[key]=string.format("Video 4-unit relay · step %d/4 · observed max %.0f%%",p.index,top*100)
+    local row=p.order[p.index]
+    if not row or now<p.due then return nil end
+    if not row.ready then r[key]=r[key] .. " · waiting for cooldown"; return nil end
+    local a,b=p.order[1],p.order[2]
+    if p.index==1 and p.cycled and hasReceivedBuff(b) then return nil end
+    if p.index==2 then
+        if not hasReceivedBuff(b) then r[key]="Second unit's received buff expired — restart the setup"; return nil end
+        if hasReceivedBuff(a) then return nil end
+    end
+    if p.index==3 then
+        if hasReceivedBuff(b) then return nil end
+        if not hasReceivedBuff(row) then r[key]="Third unit lost its transferred buff — restart the setup"; return nil end
+    end
+    if p.index==4 then
+        if hasReceivedBuff(a) then return nil end
+        if not hasReceivedBuff(row) then r[key]="Fourth unit lost its transferred buff — restart the setup"; return nil end
+    end
+    return row,p
+end
 local function comboChoice(family,rows,now)
     local r,c=API.buffRuntime,API.autoRules.buffs
     local key=family=="erwin" and "commander" or "windsong"
     if not c[key] then r[key]="Standby"; r.plans[family]=nil; return nil end
-    if #rows==0 then r[key]="Standby — no owned unit placed"; r.plans[family]=nil; return nil end
     table.sort(rows,function(a,b) return a.serial<b.serial end)
-    local parts={c.pattern}
-    for _,row in ipairs(rows) do
-        parts[#parts+1]=string.format("%d:%.1f:%.1f:%.1f",row.serial,row.position and row.position[1] or 0,
-            row.position and row.position[3] or 0,row.radius or 0)
+    if c.pattern~="Five-unit pentagon" then
+        local ring=c.pattern=="Auto" and formation(rows,"pentagon")
+        if not ring then return relayChoice(family,rows,now,key) end
     end
-    local signature=table.concat(parts,"|")
-    local p=r.plans[family]
-    if not p or p.signature~=signature then
-        local order,kind
-        if c.pattern~="Four-unit relay" then order=formation(rows,"pentagon"); if order then kind="pentagon" end end
-        if not order and c.pattern~="Five-unit pentagon" then order=formation(rows,"relay"); if order then kind="relay" end end
-        p={signature=signature,order=order,kind=kind,index=1,due=0}; r.plans[family]=p
-    end
-    if not p.order then r[key]="Setup required — four mutually covering units or a five-unit ring"; return nil end
-    -- Refresh the rows while preserving the chosen model identities.
-    local byModel={}; for _,row in ipairs(rows) do byModel[row.model]=row end
-    for i,row in ipairs(p.order) do p.order[i]=byModel[row.model] or row end
-    local row=p.order[p.index]
-    local top=0; for _,v in ipairs(rows) do top=math.max(top,v.power or 0) end
-    local label=p.kind=="relay" and "4-unit relay" or "5-unit pentagon"
-    r[key]=string.format("%s · step %d/%d · observed max %.0f%%",label,p.index,#p.order,top*100)
-    if now<p.due then return nil end
-    if not row.ready then r[key]=r[key] .. " · waiting for cooldown"; return nil end
-    if p.kind=="relay" then
-        local a,b=p.order[1],p.order[2]
-        local maxCooldown=0
-        for _,v in ipairs(p.order) do maxCooldown=math.max(maxCooldown,v.cooldownSeconds or math.huge) end
-        local gap=math.max(3,maxCooldown-2*row.duration+1)
-        if gap>=row.duration then r[key]="Setup timing cannot sustain a four-unit relay"; return nil end
-        p.gap=gap
-        if p.index==2 and (not hasReceivedBuff(row) or hasReceivedBuff(a)) then return nil end
-        if p.index==3 and hasReceivedBuff(b) then return nil end
-        if p.index==4 and (hasReceivedBuff(a) or not hasReceivedBuff(row)) then return nil end
-        if p.index==1 and p.cycled and hasReceivedBuff(b) then return nil end
-    elseif p.index~=1 and not hasReceivedBuff(row) then
-        r[key]=r[key] .. " · waiting for a transferred buff"; return nil
-    end
+    local order=formation(rows,"pentagon")
+    if not order then r[key]="Setup required — five-unit ring, each covering only its two neighbors"; r.plans[family]=nil; return nil end
+    local parts={}
+    for _,row in ipairs(order) do parts[#parts+1]=string.format("%d:%.1f:%.1f:%.1f",row.serial,row.position[1],row.position[3],row.radius) end
+    local signature=table.concat(parts,"|"); local p=r.plans[family]
+    if not p or p.kind~="pentagon" or p.signature~=signature then
+        p={kind="pentagon",signature=signature,order=order,index=1,due=0}; r.plans[family]=p
+    else p.order=order end
+    local row=p.order[p.index]; local top=0
+    for _,v in ipairs(rows) do top=math.max(top,v.power or 0) end
+    r[key]=string.format("5-unit pentagon · step %d/5 · observed max %.0f%%",p.index,top*100)
+    if now<p.due or not row.ready or p.index~=1 and not hasReceivedBuff(row) then return nil end
     return row,p
 end
+function API:_BuffPlacementLimit(row)
+    local family=row.unitId=="erwin" and "erwin" or row.unitId=="wendy" and "wendy"
+    local c=self.autoRules.buffs
+    if not family or not c[family=="erwin" and "commander" or "windsong"] then return nil end
+    if c.pattern=="Five-unit pentagon" then return 5 end
+    local p=self.buffRuntime.plans[family]
+    if p and p.kind=="pentagon" then return 5 end
+    if not p or not p.cycled and p.index==1 then return 2 end
+    if not p.cycled and p.index==2 then return 3 end
+    return 4
+end
+function API:_BuffPlacementAllowed(row,position)
+    local limit=self:_BuffPlacementLimit(row)
+    if not limit or limit==5 then return true end
+    for _,peer in ipairs(buffRows()) do
+        if peer.family==row.unitId then
+            local candidate={position=position,radius=row.range}
+            if not reaches(peer,candidate) or not reaches(candidate,peer) then return false end
+        end
+    end
+    return true
+end
+
 local function performBuff(call)
     local r=API.buffRuntime
     if not API.alive or API.autoRuntime.paused or not buffEnabled(call.row) or owned(call.row.model)~=true
@@ -5872,7 +5966,9 @@ end
 function API:SetBuffRule(key,value)
     check(key=="damage" or key=="range" or key=="cooldown" or key=="commander" or key=="windsong" or key=="pattern","Unknown buff setting")
     self:SetWaveRules({buffs={[key]=value}})
-    self.buffRuntime.plans={}
+    if key=="pattern" then self.buffRuntime.plans={}
+    elseif key=="commander" and not value then self.buffRuntime.plans.erwin=nil
+    elseif key=="windsong" and not value then self.buffRuntime.plans.wendy=nil end
     for _,s in pairs(self.buffRuntime.perUnit) do if not self.buffRuntime.call then s.blocked=false; s.failures=0 end end
 end
 function API:_BuffRuleOwns(entry,ctx)
@@ -5895,7 +5991,7 @@ local function buffTick(now)
     if flag("GameStarted")~=true or flag("GameFinished")==true then
         r.plans={}; r.status="Waiting for a match"; return
     end
-    if now<r.nextAt or API.mode=="finalizing" or API.autoRuntime.call or sellRuleDue() then return end
+    if now<r.nextAt or API.mode=="finalizing" or API.autoRuntime.call or (API.autoPlayRuntime and API.autoPlayRuntime.call) or sellRuleDue() then return end
     local ctx=API.context
     if API.mode=="playing" and ctx and ctx.busy then return end
     r.nextAt=now+0.2
@@ -5905,6 +6001,11 @@ local function buffTick(now)
         local state=r.perUnit[row.model]
         if not state then r.serial=r.serial+1; state={serial=r.serial,nextAt=0}; r.perUnit[row.model]=state end
         row.serial=state.serial
+        if buffEnabled(row) then
+            row.model:SetAttribute("_auto_active",false)
+            local b=buffServices(); local ui=b and b.gui and b.gui.unit_upgrade_ui
+            if ui and ui.auto_active_table then ui.auto_active_table[row.model]=nil end
+        end
         if state.blocked and state.blockedAt and row.last>state.blockedAt then state.blocked=false end
         row.ready=row.ready and not state.blocked and now>=(state.nextAt or 0)
         if families[row.family] then families[row.family][#families[row.family]+1]=row end
@@ -5937,6 +6038,448 @@ local function buffTick(now)
     end)
 end
 
+do
+    API.autoPlayRuntime={status="Auto Play is off",nextAt=0,perUnit={},blocked={},cursor=0,drafts={}}
+    local bridge,retry=nil,0
+    local function services()
+        if bridge then return bridge end
+        if os.clock()<retry then return nil end
+        retry=os.clock()+2
+        local ok,value=pcall(function()
+            local src=RS:FindFirstChild("src"); local module=src and src:FindFirstChild("Loader")
+            if not module then return nil end
+            local L=require(module)
+            return {loader=L,units=L.load_data(nil,"Units"),levels=L.load_data(nil,"Levels"),worlds=L.load_data(nil,"Worlds"),
+                collection=L.load_client_service(nil,"UnitCollectionServiceClient"),stats=L.load_client_service(nil,"StatsServiceClient"),
+                gui=L.load_client_service(nil,"GUIService"),unit=L.load_core_service(nil,"UnitServiceCore"),
+                placement=L.load_core_service(nil,"PlacementCore"),input=L.load_client_service(nil,"InputServiceClient"),
+                tags=game:GetService("CollectionService"),sizes={}}
+        end)
+        if ok then bridge=value else API.autoPlayRuntime.status="Waiting for placement services: " .. tostring(value) end
+        return bridge
+    end
+    local function category(level,b)
+        local id=tostring(level.id or ""):lower()
+        local mode=tostring(level._gamemode or ""):lower()
+        local world=b and b.worlds[level.world]
+        if level._portal_only_level or level.portal_group or id:find("portal",1,true) then return "Portal" end
+        if mode:find("tower",1,true) or id:find("tower",1,true) then return "Tower" end
+        if level.raid or world and world.raid_world or mode:find("raid",1,true) then return "Raid" end
+        if level.infinite or mode=="infinite" or id:find("infinite",1,true) then return "Infinite" end
+        if mode:find("challenge",1,true) or id:find("challenge",1,true) then return "Challenge" end
+        if level.story_level_rank or mode=="story" then return "Story" end
+        return "Other"
+    end
+    local function context()
+        if type(Options.AutoPlayContext)=="function" then return Options.AutoPlayContext() end
+        local b=services(); if not b then return {} end
+        local level=b.loader.LevelData or {}
+        return {map=level.map,category=category(level,b),levelId=level.id,isLobby=b.loader.IsLobby}
+    end
+    local function key(c) return tostring(c.category) .. ":" .. tostring(c.map) end
+    local function active()
+        return API.alive and API.autoRules.autoplay.enabled and not API.autoRuntime.paused
+            and (API.mode=="idle" or API.mode=="recording") and flag("GameStarted")==true and flag("GameFinished")~=true
+    end
+    local function readyContext()
+        local c=context(); if c.isLobby or type(c.map)~="string" then return nil end
+        local config=workspace:FindFirstChild("_MAP_CONFIG")
+        local loaded=config and config:FindFirstChild("MapLoaded")
+        local ready=workspace:FindFirstChild("SERVER_READY")
+        if not unitsFolder() or loaded and loaded.Value~=true or ready and ready.Value~=true then return nil end
+        if API.autoRules.autoplay.mode=="Circle Placement" then
+            local p=API.autoRules.autoplay.plans[key(c)]
+            if not p or p.placeId~=game.PlaceId then return nil end
+        end
+        return c
+    end
+    function API:_AutoPlayUpgradeDue()
+        return active() and self.autoRules.autoplay.upgrade and readyContext()~=nil
+    end
+    function API:_AutoPlaySellDue()
+        local wave=Clock.sample and Clock.sample.wave
+        local target=self.autoRules.autoplay.sellWave
+        return active() and target>0 and finite(wave) and wave>=target and readyContext()~=nil
+    end
+    function API:SetAutoPlay(patch)
+        check(type(patch)=="table","Auto Play settings must be a table")
+        self:SetWaveRules({autoplay=patch})
+        local r=self.autoPlayRuntime
+        r.nextAt,r.candidates,r.blocked=0,nil,{}
+        if not r.call then r.perUnit={} end
+        if not self.autoRules.autoplay.enabled then r.pick=nil end
+    end
+    function API:GetAutoPlayMaps(selectedCategory)
+        if type(Options.AutoPlayMaps)=="function" then return Options.AutoPlayMaps(selectedCategory) end
+        local b=services(); local rows,seen={},{}
+        if b then
+            for _,level in pairs(b.levels) do
+                if type(level)=="table" and type(level.map)=="string" and category(level,b)==selectedCategory and not seen[level.map] then
+                    local world=b.worlds[level.world]
+                    rows[#rows+1]={value=level.map,label=world and world.name or level._location_name or level.map}
+                    seen[level.map]=true
+                end
+            end
+        end
+        local c=context()
+        if c.category==selectedCategory and type(c.map)=="string" and not seen[c.map] then rows[#rows+1]={value=c.map,label=c.map} end
+        table.sort(rows,function(a,b) if a.label==b.label then return a.value<b.value end; return a.label<b.label end)
+        return rows
+    end
+    function API:SetAutoPlayCircle(selectedCategory,map,point)
+        local c=context()
+        check(c.category==selectedCategory and c.map==map and not c.isLobby,"Join the selected map and mode before setting its position")
+        local probe=normalizeWaveRules(self.autoRules)
+        local p={map=map,category=selectedCategory,placeId=game.PlaceId,center=point}
+        probe.autoplay.plans[key(c)]=p
+        p=normalizeWaveRules(probe).autoplay.plans[key(c)]
+        self.autoPlayRuntime.drafts[key(c)]=p
+        self.autoPlayRuntime.status=string.format("Circle selected at %.1f, %.1f, %.1f; save the plan",unpackArgs(p.center))
+        return p
+    end
+    function API:SaveAutoPlayPlan(selectedCategory,map,name)
+        local planKey=selectedCategory .. ":" .. map
+        local p=self.autoPlayRuntime.drafts[planKey] or self.autoRules.autoplay.plans[planKey]
+        check(p~=nil,"Set a circle position on this map first")
+        local plans=normalizeWaveRules(self.autoRules).autoplay.plans
+        plans[planKey]=p
+        self:SetAutoPlay({plans=plans})
+        local path=self:SaveWaveRules(name)
+        self.autoPlayRuntime.drafts[planKey]=nil
+        self.autoPlayRuntime.status="Saved plan for " .. map
+        return path
+    end
+    function API:PickAutoPlayCircle(selectedCategory,map)
+        local c=context()
+        check(c.map==map and c.category==selectedCategory and not c.isLobby,"Join the selected map and mode first")
+        self.autoPlayRuntime.pick={category=selectedCategory,map=map,since=os.clock()}
+        self.autoPlayRuntime.status="Click the map to set the circle center; Esc cancels"
+    end
+    local function footprint(b,data,definition)
+        local cached=b.sizes[data.unit_id]
+        if cached then return cached end
+        local model
+        local ok,size=pcall(function()
+            model=b.unit.get_pet_model(data.unit_id,data.shiny,data.skin,nil,nil,nil,true,{traits=data.traits})
+            model.Name=b.unit.get_pet_model_name(data.unit_id,data.shiny,data.skin,true,{traits=data.traits})
+            local hit=b.unit.create_hitbox_client(model,false,definition)
+            return {radius=math.max(hit.Size.X,hit.Size.Z)/2+0.75,height=hit.Size.Y}
+        end)
+        if model then model:Destroy() end
+        if not ok then return nil end
+        b.sizes[data.unit_id]=size
+        return size
+    end
+    local function team()
+        if type(Options.AutoPlayTeam)=="function" then return Options.AutoPlayTeam() end
+        local b=services(); if not b or not b.gui.units_spawn_ui then return {} end
+        local rows={}
+        for i=1,6 do
+            local uuid,data=b.collection.get_unit_in_equipped_slot(tostring(i))
+            if uuid and data then
+                local definition=b.stats.session.collection:get_upgraded_unit_data(data.unit_id) or b.units[data.unit_id]
+                if definition then
+                    local count,cap,_,full=b.gui.units_spawn_ui:get_placement_counts(data)
+                    local size=footprint(b,data,definition)
+                    local price=math.ceil(definition.cost*b.unit.calculate_spawn_cost_multiplier(b.stats.session,data))
+                    if size and finite(price) and finite(count) and finite(cap) then
+                        rows[#rows+1]={slot=i,uuid=uuid,unitId=data.unit_id,definition=definition,count=count,cap=cap,full=full,
+                            cost=price,radius=size.radius,height=size.height,range=tonumber(definition.range) or 20}
+                    end
+                end
+            end
+        end
+        return rows
+    end
+    local function money()
+        if type(Options.AutoPlayMoney)=="function" then return Options.AutoPlayMoney() end
+        local stats=Player:FindFirstChild("_stats"); local resource=stats and stats:FindFirstChild("resource")
+        return resource and resource.Value
+    end
+    local function roads()
+        if type(Options.AutoPlayRoads)=="function" then
+            local rows=Options.AutoPlayRoads(); API.autoPlayRuntime.pathRoads=rows; return rows
+        end
+        local r=API.autoPlayRuntime; local folder=workspace:FindFirstChild("_road")
+        if r.roadFolder==folder and r.roads then return r.roads end
+        local rows,main={},{}
+        for _,p in ipairs(folder and folder:GetDescendants() or {}) do
+            if p:IsA("BasePart") then
+                local x,z=p.CFrame.RightVector,p.CFrame.LookVector
+                local row={position=vec(p.Position),right={x.X,x.Z},forward={z.X,z.Z},sx=p.Size.X/2,sz=p.Size.Z/2}
+                rows[#rows+1]=row
+                if p.Name=="main" then main[#main+1]=row end
+            end
+        end
+        r.roadFolder,r.roads,r.pathRoads=folder,rows,#main>0 and main or rows
+        return rows
+    end
+    local function rectDistance(p,rect)
+        local dx,dz=p[1]-rect.position[1],p[3]-rect.position[3]
+        local x=math.abs(dx*rect.right[1]+dz*rect.right[2])-rect.sx
+        local z=math.abs(dx*rect.forward[1]+dz*rect.forward[2])-rect.sz
+        return math.sqrt(math.max(0,x)^2+math.max(0,z)^2)
+    end
+    local function surface(row,p)
+        if type(Options.AutoPlaySurface)=="function" then return Options.AutoPlaySurface(row,p) end
+        local b=services(); if not b then return nil end
+        local function cast(x,z)
+            return b.placement.raycast(Vector3.new(x,p[2]+80,z),Vector3.new(0,-200,0))
+        end
+        local hit=cast(p[1],p[3])
+        if not hit or not b.placement.is_valid_raycast_hit(hit.Instance,row.definition) or hit.Normal.Y<0.8 then return nil end
+        for _,delta in ipairs({{row.radius,0},{-row.radius,0},{0,row.radius},{0,-row.radius}}) do
+            local edge=cast(p[1]+delta[1],p[3]+delta[2])
+            if not edge or not b.placement.is_valid_raycast_hit(edge.Instance,row.definition) or math.abs(edge.Position.Y-hit.Position.Y)>0.6 then return nil end
+        end
+        return vec(hit.Position)
+    end
+    local function free(row,p)
+        for _,road in ipairs(roads()) do
+            if math.abs(p[2]-road.position[2])<row.height+2 and rectDistance(p,road)<row.radius+0.25 then return false end
+        end
+        if type(Options.AutoPlayFree)=="function" then return Options.AutoPlayFree(row,p) end
+        local bounds=RS:FindFirstChild("_bounds")
+        local obstacles={}
+        local center=Vector3.new(p[1],p[2]+row.height/2+0.15,p[3])
+        for _,part in ipairs(bounds and bounds:GetDescendants() or {}) do
+            if part:IsA("BasePart") then
+                local q=part.CFrame:PointToObjectSpace(center)
+                if math.abs(q.Y)<part.Size.Y/2+row.height/2 and math.abs(q.X)<part.Size.X/2+row.radius
+                    and math.abs(q.Z)<part.Size.Z/2+row.radius then obstacles[#obstacles+1]=part end
+            end
+        end
+        -- Mesh bounding boxes include empty space. Use the engine's narrow-phase
+        -- collision test on temporary local copies rather than reject the box.
+        if #obstacles>0 then
+            local folder=Instance.new("Folder"); folder.Name="MAA_PlacementQuery"
+            folder.Parent=workspace:FindFirstChild("ignore") or workspace
+            local ok,blocked=pcall(function()
+                local probe=Instance.new("Part"); probe.Shape=Enum.PartType.Cylinder
+                probe.Size=Vector3.new(row.height,row.radius*2,row.radius*2)
+                probe.CFrame=CFrame.new(center)*CFrame.Angles(0,0,math.pi/2)
+                probe.Anchored=true; probe.CanCollide=false; probe.CanTouch=false; probe.Transparency=1; probe.Parent=folder
+                local copies={}
+                for _,part in ipairs(obstacles) do
+                    local clone=part:Clone(); clone:ClearAllChildren()
+                    clone.Anchored=true; clone.CanCollide=false; clone.CanTouch=false; clone.CanQuery=true; clone.Transparency=1
+                    clone.Parent=folder; copies[#copies+1]=clone
+                end
+                local params=OverlapParams.new(); params.FilterType=Enum.RaycastFilterType.Include
+                params.FilterDescendantsInstances=copies; params.MaxParts=1
+                return #workspace:GetPartsInPart(probe,params)>0
+            end)
+            folder:Destroy()
+            if not ok or blocked then return false end
+        end
+        local b=services()
+        for _,model in ipairs(unitsFolder():GetChildren()) do
+            if model:IsA("Model") and (owned(model)~=nil or b and b.tags:HasTag(model,"player_units")) then
+                local pos=unitPosition(model)
+                local hit=model:FindFirstChild("_hitbox")
+                local radius=hit and math.max(hit.Size.Y,hit.Size.Z)/2 or 2
+                if pos and math.abs(pos.Y-p[2])<row.height+3 and nearby(pos,p,row.radius+radius+0.4) then return false end
+            end
+        end
+        return true
+    end
+    local function candidates(row,c)
+        local r,a=API.autoPlayRuntime,API.autoRules.autoplay
+        roads()
+        local plan=a.plans[key(c)]
+        local stamp=table.concat({key(c),row.unitId,row.radius,a.mode,tostring(a.snapCorners),a.radius,
+            plan and table.concat(plan.center,",") or ""},"|")
+        r.candidates=r.candidates or {}
+        if r.candidates[stamp] then return r.candidates[stamp] end
+        local list,seen={},{}
+        local function add(p,bonus)
+            local k=string.format("%.1f:%.1f",p[1],p[3]); if seen[k] then return end; seen[k]=true
+            local score=bonus or 0
+            for _,road in ipairs(r.pathRoads or roads()) do
+                local distance=rectDistance(p,road)
+                if distance<=row.range then score=score+math.max(0,1-distance/math.max(1,row.range)) end
+            end
+            list[#list+1]={p=p,score=score,key=k}
+        end
+        if a.mode=="Circle Placement" and plan then
+            add(plan.center,0)
+            for i=1,120 do
+                local distance=a.radius*math.sqrt(i/120); local angle=i*2.399963229728653
+                add({plan.center[1]+math.cos(angle)*distance,plan.center[2],plan.center[3]+math.sin(angle)*distance},-distance/100)
+            end
+        else
+            for _,road in ipairs(r.pathRoads or {}) do
+                local along,across,length,width
+                if road.sx>=road.sz then along,across,length,width=road.right,road.forward,road.sx,road.sz
+                else along,across,length,width=road.forward,road.right,road.sz,road.sx end
+                for _,t in ipairs({-1,-0.5,0,0.5,1}) do for _,side in ipairs({-1,1}) do
+                    local offset=side*(width+row.radius+0.75)
+                    add({road.position[1]+along[1]*length*t+across[1]*offset,road.position[2],
+                        road.position[3]+along[2]*length*t+across[2]*offset},a.snapCorners and math.abs(t)==1 and 0.35 or 0)
+                end end
+            end
+        end
+        table.sort(list,function(x,y) if x.score==y.score then return x.key<y.key end; return x.score>y.score end)
+        r.candidates[stamp]=list
+        return list
+    end
+    local function point(row,c)
+        local r=API.autoPlayRuntime
+        local list=candidates(row,c); local attempt=0
+        local blocks=r.blocked[row.uuid] or {}; r.blocked[row.uuid]=blocks
+        r.scanCursor=r.scanCursor or {}
+        local start=r.scanCursor[row.uuid] or 1
+        for n=1,#list do
+            local index=(start+n-2)%#list+1
+            local candidate=list[index]
+            r.scanCursor[row.uuid]=index%#list+1
+            if not blocks[candidate.key] then
+                attempt=attempt+1
+                local p=surface(row,candidate.p)
+                if p and free(row,p) and API:_BuffPlacementAllowed(row,p) then return p,candidate.key end
+                -- Invalid surfaces/occupied points are rechecked after the next scan cycle.
+                if attempt>=16 then break end
+            end
+        end
+        return nil
+    end
+    local function sameMap(call)
+        return key(context())==call.mapKey
+    end
+    local function confirmedSpawn(call)
+        for _,model in ipairs(unitsFolder() and unitsFolder():GetChildren() or {}) do
+            if not call.before[model] and model:IsA("Model") and owned(model)==true and tostring(stat(model,"id"))==call.row.unitId
+                and nearby(unitPosition(model),call.position,4) then return true end
+        end
+        return false
+    end
+    local function perform(call)
+        local r=API.autoPlayRuntime
+        if not active() or not sameMap(call) or API:_AutoPlaySellDue() then return end
+        local result
+        if call.kind=="spawn" then
+            result=pack(pcall(function() return checkRemote("spawn_unit","InvokeServer"):InvokeServer(call.row.uuid,CFrame.new(unpackArgs(call.position))) end))
+        else
+            if owned(call.model)~=true or unitModel(call.model)~=call.model then return end
+            result=pack(pcall(function() return checkRemote("change_priority","InvokeServer"):InvokeServer(call.model,call.priority) end))
+        end
+        call.returned=true
+        if not API.alive then return end
+        local state=call.state
+        if not result[1] then state.blocked=true; r.status="Auto Play request error: " .. tostring(result[2]); return end
+        local function observed()
+            if call.kind=="spawn" then return confirmedSpawn(call) end
+            return stat(call.model,"priority")==call.priority
+        end
+        if isRejected(result) and not observed() then
+            state.failures=(state.failures or 0)+1; state.nextAt=os.clock()+math.min(8,2^state.failures)
+            if call.kind=="spawn" then
+                r.blocked[call.row.uuid]=r.blocked[call.row.uuid] or {}
+                r.blocked[call.row.uuid][call.candidate]=true
+            end
+            if state.failures>=3 then state.blocked=true end
+            r.status="Auto Play rejected; backing off (" .. state.failures .. "/3)"; return
+        end
+        local deadline=os.clock()+(Options.ConfirmTimeout or 8)
+        while not observed() and os.clock()<deadline do
+            if not active() or not sameMap(call) then state.blocked=true; return end
+            task.wait(0.05)
+        end
+        if not observed() then state.blocked=true; r.status="Auto Play action unconfirmed; unit paused"; return end
+        state.failures,state.nextAt=0,os.clock()+0.7
+        r.status=call.kind=="spawn" and "Placement confirmed: " .. call.row.unitId or "Target priority confirmed"
+    end
+    function API:_AutoPlayTick(now)
+        local r,a=self.autoPlayRuntime,self.autoRules.autoplay
+        if r.call then
+            if not r.call.returned and now-r.call.started>(Options.CallTimeout or 8) then r.status="Auto Play request timed out; waiting for its result" end
+            return
+        end
+        if not a.enabled then r.status="Auto Play is off"; return end
+        if self.autoRuntime.paused then r.status="Auto Play paused"; r.pick=nil; return end
+        if self.mode~="idle" and self.mode~="recording" then r.status="Waiting while macro playback is enabled"; return end
+        if not active() then r.scene=nil; r.status="Waiting for a match"; return end
+        local c=readyContext()
+        if not c then r.status="Waiting for this map's saved circle plan or map readiness"; return end
+        local road=workspace:FindFirstChild("_road")
+        local scene=key(c)
+        if r.scene~=scene or r.activeRoad~=road then
+            r.scene,r.activeRoad,r.perUnit,r.blocked,r.candidates,r.cursor,r.scanCursor=scene,road,{},{},nil,0,{}
+        end
+        if sellRuleDue() then r.status="Auto-sell wave reached; placement stopped"; return end
+        if now<r.nextAt or self.autoRuntime.call or self.buffRuntime.call or r.pick then return end
+        r.nextAt=now+0.6
+        local chosen
+        if a.priorityEnabled then
+            local b
+            if type(Options.AutoPlayPriorities)~="function" then b=services() end
+            for _,model in ipairs(unitsFolder():GetChildren()) do
+                if model:IsA("Model") and owned(model)==true and stat(model,"priority")~=a.priority then
+                    local state=r.perUnit[model] or {}; r.perUnit[model]=state
+                    local valid=type(Options.AutoPlayPriorities)=="function" and Options.AutoPlayPriorities(model) or b and b.unit.get_valid_priorities(model)
+                    if valid and valid[a.priority] and not state.blocked and now>=(state.nextAt or 0) then
+                        chosen={kind="priority",model=model,priority=a.priority,state=state}; break
+                    end
+                end
+            end
+        end
+        if not chosen then
+            local rows=team(); local funds=money()
+            if not finite(funds) then r.status="Waiting for player currency"; return end
+            for n=1,#rows do
+                local index=(r.cursor+n-1)%#rows+1; local row=rows[index]
+                local state=r.perUnit[row.uuid] or {}; r.perUnit[row.uuid]=state
+                local limit=self:_BuffPlacementLimit(row)
+                if not row.full and row.count<math.min(row.cap,limit or row.cap) and row.cost<=funds and not state.blocked and now>=(state.nextAt or 0) then
+                    local p,k=point(row,c)
+                    if p then
+                        chosen={kind="spawn",row=row,position=p,candidate=k,state=state,before=snapshot()}
+                        r.cursor=index; break
+                    end
+                end
+            end
+        end
+        if not chosen then r.status="Waiting for funds, free placement or unit caps"; return end
+        chosen.started,chosen.mapKey=now,key(c); r.call=chosen
+        task.spawn(function()
+            local ok,err=pcall(perform,chosen)
+            if r.call==chosen then r.call=nil end
+            if not ok then chosen.state.blocked=true; r.status="Auto Play stopped this unit: " .. tostring(err) end
+        end)
+    end
+    function API:GetAutoPlayInfo()
+        local c=context()
+        local r=self.autoPlayRuntime
+        return {map=c.map,category=c.category,levelId=c.levelId,status=r.status,plans=self.autoRules.autoplay.plans,
+            selecting=r.pick~=nil,configured=self.autoRules.autoplay.plans[key(c)]~=nil}
+    end
+    function API:PreviewAutoPlay()
+        local c=readyContext() or context(); local rows=team(); local out={map=c.map,category=c.category,units={}}
+        for _,row in ipairs(rows) do
+            local p=point(row,c)
+            out.units[#out.units+1]={slot=row.slot,id=row.unitId,cost=row.cost,count=row.count,cap=row.cap,position=p}
+        end
+        return out
+    end
+    API.connections[#API.connections+1]=UIS.InputBegan:Connect(function(input,processed)
+        local r=API.autoPlayRuntime; local pick=r.pick
+        if not pick then return end
+        if input.KeyCode==Enum.KeyCode.Escape then r.pick=nil; r.status="Circle selection cancelled"; return end
+        if processed or os.clock()-pick.since<0.2 then return end
+        if input.UserInputType~=Enum.UserInputType.MouseButton1 and input.UserInputType~=Enum.UserInputType.Touch then return end
+        local ok,err=pcall(function()
+            local b=services(); check(b~=nil,"Placement services are unavailable")
+            local pointer=b.input.get_pointer_position(); check(pointer~=nil,"Pointer unavailable")
+            local ray=workspace.CurrentCamera:ViewportPointToRay(pointer.X,pointer.Y)
+            local hit=b.placement.raycast(ray.Origin,ray.Direction*500)
+            check(hit~=nil,"Click a placement surface on the map")
+            API:SetAutoPlayCircle(pick.category,pick.map,vec(hit.Position))
+            r.pick=nil
+        end)
+        if not ok then r.status=tostring(err) end
+    end)
+end
+
 local prevStarted,prevFinished,prevWave=flag("GameStarted"),flag("GameFinished"),workspaceNumber("_wave_num")
 local lastUI=0
 local function tick()
@@ -5950,6 +6493,8 @@ local function tick()
         or (prevWave and sample.wave and prevWave>1 and sample.wave==0))
     prevStarted,prevFinished,prevWave=started,finished,sample.wave
     if newMatch then
+        API.autoPlayRuntime.scene=nil
+        API.autoPlayRuntime.roadFolder=nil
         if API.mode=="record_armed" then beginRecording("match")
         elseif API.mode=="play_armed" or API.mode=="waiting_round" then beginPlayback()
         elseif API.mode=="playing" then abort("The match reset before playback finished") end
@@ -5969,6 +6514,7 @@ local function tick()
     elseif API.mode=="playing" then playTick(API.context,now) end
     automationTick(now)
     buffTick(now)
+    API:_AutoPlayTick(now)
 
     if API.updateUI and now-lastUI>0.25 then
         lastUI=now
@@ -5990,6 +6536,7 @@ function API:SaveDiagnostics()
         startVoteStatus=self.replayRuntime.startStatus,startVoteAttempts=self.replayRuntime.startAttempts,
         skipVoteStatus=self.matchRuntime.skipStatus,matchContextError=self.matchRuntime.contextError,
         buffStatus=self.buffRuntime.status,commanderStatus=self.buffRuntime.commander,windsongStatus=self.buffRuntime.windsong,
+        autoPlayStatus=self.autoPlayRuntime.status,autoPlayMap=self:GetAutoPlayInfo(),
         playback=self.context and not self.context.recording and self.context.audit or nil,
         activeRequest=self.context and self.context.activeAudit or nil,uiError=self.uiError}
     local actions=self.document and self.document.actions or {}
@@ -6051,7 +6598,7 @@ pcall(function()
         local active=API.mode~="idle" or API.autoReplay or API.autoRules.start.enabled
             or m.skipWave or m.nextStory or m.nextRoom or m.nextPortal or m.leave
             or API.autoRules.buffs.damage or API.autoRules.buffs.range or API.autoRules.buffs.cooldown
-            or API.autoRules.buffs.commander or API.autoRules.buffs.windsong
+            or API.autoRules.buffs.commander or API.autoRules.buffs.windsong or API.autoRules.autoplay.enabled
         if not active then return end
         if type(queueTeleport)~="function" then
             notify("Teleport resume is unavailable in this executor; rerun the loader after joining")
@@ -6093,7 +6640,7 @@ if Options.ShowUI~=false then
     local app=MattLib.new({id="aa-macro-v2",design="Vector",wallpaperAssets=false,capabilities={},
         onError=function(message) notify("UI: " .. tostring(message)) end})
     API.uiApp=app
-    local window=app:CreateWindow({Id="macro",Title="MAA 2.6",Design="Vector",Size={800,620},
+    local window=app:CreateWindow({Id="macro",Title="MAA 2.7",Design="Vector",Size={800,620},
         MinSize={520,400},OpenKey="RightControl",OnClose=function() API:Shutdown() end})
     API.uiWindow=window
     local function try(fn)
@@ -6274,7 +6821,7 @@ if Options.ShowUI~=false then
     local buffSetup=buffsTab:AddSection({Title="Combo setup & status"})
     local buffPattern=buffSetup:AddDropdown({Title="Commander / Windsong pattern",Options={"Auto","Four-unit relay","Five-unit pentagon"},
         Default=API.autoRules.buffs.pattern,Callback=function(value) setBuff("pattern",value) end})
-    buffSetup:AddParagraph({Content="Auto validates a five-unit ring first, then four mutually covering units. Place the units yourself. The relay follows received-buff expiry and observed casts; the ring follows its ordered cycle and real cooldowns. Status reports observed buff strength. A 100% stack is separate from uninterrupted uptime. Unsupported layouts wait for setup."})
+    buffSetup:AddParagraph({Content="Auto accepts a valid five-unit ring, otherwise follows the video relay: start with two units; after cast 1 place the third; wait four seconds; after cast 2 place the fourth. Status guides each step. Auto Play can stage these four placements in mutual range. Extra or early units pause the setup. Current cooldowns and buff expiry control later casts. The video requires suitable curses; MAA does not change curses. Observed stack strength does not promise full uptime."})
     buffSetup:AddParagraph({Content="Damage uses basic buff upkeep unless its Commander/Windsong combo is enabled. Kisuke's range and attack-SPA buffs share one cast; they unlock at upgrade 6. The active ability cooldown changes with later upgrades. Passive auras such as Idol (Star) need no active request."})
     buffSetup:AddButton({Title="Save Buffs settings in this macro JSON",Callback=function() try(function() API:SaveWaveRules(name:GetValue()) end) end})
     buffSetup:AddButton({Title="Resume buff automation",Callback=function() API:PauseWaveRules(false) end})
@@ -6287,6 +6834,74 @@ if Options.ShowUI~=false then
         commanderStatus:Update({Content="Commander (Erwin): " .. API.buffRuntime.commander})
         windsongStatus:Update({Content="Windsong (Wendy): " .. API.buffRuntime.windsong})
         buffStatus:Update({Content=API.buffRuntime.status})
+    end
+
+    local autoTab=window:AddTab({Title="Auto Play",Icon="controls",Columns=2,MinColumnWidth=260,Gap=12})
+    local autoConfig=autoTab:AddSection({Title="AUTO PLAY CONFIG"})
+    local ac={}
+    local function autoChange(key,value)
+        if not API.syncingAutoPlayUI then try(function() API:SetAutoPlay({[key]=value}) end) end
+    end
+    ac.enabled=autoConfig:AddToggle({Title="Enable Auto Play",Default=API.autoRules.autoplay.enabled,Callback=function(v) autoChange("enabled",v) end})
+    ac.mode=autoConfig:AddDropdown({Title="Placement Mode",Options={"Smart Path & Corners","Circle Placement"},Default=API.autoRules.autoplay.mode,
+        Callback=function(v) autoChange("mode",v) end})
+    ac.snapCorners=autoConfig:AddToggle({Title="Snap to Path Corners",Default=API.autoRules.autoplay.snapCorners,Callback=function(v) autoChange("snapCorners",v) end})
+    ac.priorityEnabled=autoConfig:AddToggle({Title="Auto Target Priority",Default=API.autoRules.autoplay.priorityEnabled,Callback=function(v) autoChange("priorityEnabled",v) end})
+    ac.priority=autoConfig:AddDropdown({Title="Target Priority",Default=API.autoRules.autoplay.priority,
+        Options={{label="First",value="first"},{label="Last",value="last"},{label="Strongest",value="strongest"},{label="Weakest",value="weakest"},
+            {label="Closest",value="closest"},{label="Farthest",value="farthest"},{label="Flying",value="flying"},{label="Soaring",value="soaring"}},
+        Callback=function(v) autoChange("priority",v) end})
+    ac.radius=autoConfig:AddSlider({Title="Circle Radius (studs)",Min=5,Max=100,Step=1,Default=API.autoRules.autoplay.radius,Callback=function(v) autoChange("radius",v) end})
+    ac.upgrade=autoConfig:AddToggle({Title="Auto Upgrade Units",Default=API.autoRules.autoplay.upgrade,Callback=function(v) autoChange("upgrade",v) end})
+    ac.maxUpgrades=autoConfig:AddSlider({Title="Max Upgrades per Unit (0 = Max)",Min=0,Max=100,Step=1,Default=API.autoRules.autoplay.maxUpgrades,
+        Callback=function(v) autoChange("maxUpgrades",v) end})
+    ac.sellWave=autoConfig:AddSlider({Title="Auto Sell at Wave (0 = Off)",Min=0,Max=1000,Step=1,Default=API.autoRules.autoplay.sellWave,
+        Callback=function(v) autoChange("sellWave",v) end})
+    autoConfig:AddButton({Title="Save Auto Play settings in this macro JSON",Callback=function() try(function() API:SaveWaveRules(name:GetValue()) end) end})
+    autoConfig:AddButton({Title="Resume Auto Play",Callback=function() API:PauseWaveRules(false) end})
+    local circleSection=autoTab:AddSection({Title="CIRCLE PLACEMENT PLAN"})
+    local info=API:GetAutoPlayInfo()
+    local selectedCategory=info.category or "Story"
+    local selectedMap=info.map or ""
+    local mapOptions=API:GetAutoPlayMaps(selectedCategory)
+    if #mapOptions==0 then mapOptions={{label="Join a match to load map data",value=""}} end
+    local categoryControl,mapControl
+    categoryControl=circleSection:AddDropdown({Title="Game Mode Category",Options={"Story","Infinite","Raid","Challenge","Portal","Tower","Other"},Default=selectedCategory,
+        Callback=function(v)
+            if API.syncingAutoPlayUI then return end
+            selectedCategory=v
+            API.syncingAutoPlayUI=true
+            local options=API:GetAutoPlayMaps(v)
+            if #options==0 then options={{label="No maps available",value=""}} end
+            mapControl:SetValue(""); mapControl:Update({Options=options})
+            selectedMap=options[1].value; mapControl:SetValue(selectedMap)
+            API.syncingAutoPlayUI=false
+        end})
+    local found=false; for _,option in ipairs(mapOptions) do if option.value==selectedMap then found=true end end
+    if not found then selectedMap=mapOptions[1].value end
+    mapControl=circleSection:AddSearchableDropdown({Title="Select Map / Stage",Options=mapOptions,Default=selectedMap,
+        Callback=function(v) if not API.syncingAutoPlayUI then selectedMap=v end end})
+    circleSection:AddButton({Title="Set Circle Position (Click on Map)",Callback=function() try(function() API:PickAutoPlayCircle(selectedCategory,selectedMap) end) end})
+    circleSection:AddButton({Title="Save Plan for Map",Callback=function() try(function() API:SaveAutoPlayPlan(selectedCategory,selectedMap,name:GetValue()) end) end})
+    local summarySection=autoTab:AddSection({Title="PLAN SUMMARY & INFO"})
+    local planSummary=summarySection:AddParagraph({Content="No placement plan configured for this map."})
+    local autoStatus=summarySection:AddParagraph({Content="Auto Play is off"})
+    summarySection:AddParagraph({Content="Smart Path uses road geometry and nearby-path coverage; corner snapping favors segment ends. Circle mode waits for a saved center on the current map and mode. Plans do not select or teleport to a stage. Equipped slots are rotated up to their actual caps, with funds, ground/hill surface and collision checks."})
+    summarySection:AddParagraph({Content="Auto Play waits while macro Play is enabled. Auto Priority applies only valid targets to your units; unsupported Flying/Soaring targets are skipped. Upgrade and sell controls use the shared wave-rule worker; explicit wave-upgrade settings take precedence. Stop everything pauses Auto Play. Save settings and all map plans in the same JSON."})
+    local function syncAutoPlayUI()
+        API.syncingAutoPlayUI=true
+        for key,control in pairs(ac) do if control:GetValue()~=API.autoRules.autoplay[key] then control:SetValue(API.autoRules.autoplay[key]) end end
+        API.syncingAutoPlayUI=false
+        local planKey=selectedCategory .. ":" .. selectedMap
+        local draft=API.autoPlayRuntime.drafts[planKey]
+        local plan=draft or API.autoRules.autoplay.plans[planKey]
+        local text=selectedCategory .. " / " .. selectedMap
+        if plan then text=text .. string.format("\nCenter: %.1f, %.1f, %.1f\nRadius: %.0f studs%s",plan.center[1],plan.center[2],plan.center[3],API.autoRules.autoplay.radius,draft and " · Unsaved position" or " · Saved")
+        else text=text .. "\nNo circle plan configured for this map." end
+        local live=API:GetAutoPlayInfo()
+        text=text .. "\nCurrent: " .. tostring(live.category or "Unavailable") .. " / " .. tostring(live.map or "Unavailable")
+        planSummary:Update({Content=text})
+        autoStatus:Update({Content=API.autoPlayRuntime.status})
     end
 
     local automation=window:AddTab({Title="Wave rules",Icon="controls",Columns=2,MinColumnWidth=260,Gap=12})
@@ -6329,6 +6944,7 @@ if Options.ShowUI~=false then
         syncActions()
         syncMatchUI()
         syncBuffUI()
+        syncAutoPlayUI()
         local c,ctx=API:Counts(),API.context
         local count=API.document and #API.document.actions or 0
         local text=string.format("%s\n%d recorded  |  %d pending  |  %d unconfirmed\n%s",API.mode,c.successful,c.pending,c.failed,API.message)
@@ -6352,5 +6968,5 @@ if Options.ShowUI~=false then
     end
     API.updateUI()
 end
-notify("MAA 2.6 ready: Buffs includes upkeep and formation-aware combo modes.")
+notify("MAA 2.7 ready: Auto Play supports path placement and saved map circle plans.")
 return API

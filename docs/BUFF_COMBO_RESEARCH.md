@@ -31,10 +31,16 @@ The [Destructoid guide](https://www.destructoid.com/how-to-100-buff-with-erwin-w
 - Read actual cast confirmations before advancing. Unconfirmed requests must not be repeatedly sent.
 - Prevent generic Damage/Range/Cooldown automation from interrupting a specialized combo or duplicating a recorded ability cast.
 - Show **100% stack** only when that amount is observed on the relevant unit statistics. Do not equate full uptime with +100% damage.
-- Keep all five toggles off by default and store settings in the existing macro JSON. Do not automatically change curses, traits, equipment or placement.
+- Keep all five toggles off by default and store settings in the existing macro JSON. Do not automatically change curses, traits or equipment. Automatic placement requires the separate Auto Play control to be enabled.
+
+## Supplied 2026 tutorial and v2.7 correction
+
+The [Lenio video](https://www.youtube.com/watch?v=XPMjMMMMkyg) was inspected through its captions and visible frames on November 3. It requires a suitable curse and staged placement: start with two supports, cast the first, place the third and wait four seconds, cast the second, then place the fourth. The remaining casts follow expiry of the received buffs. At the final shown frame some supports display 95% while others display 100%.
+
+This corrects v2.6's assumption that all four supports could be placed before setup. V2.7 rejects that unseeded layout, guides manual staging, and lets Auto Play stage the required births in mutual range. It also suppresses the game's native auto-cast table/attribute on managed supports, because the UnitUpgradeUI client loop could otherwise cast outside MAA's schedule. Unrelated Buffs controls preserve an in-progress sequence.
 
 ## Verification boundary
 
-The current client confirms the listed abilities, cooldown fields, upgrade unlocks, buff categories and passive aura. No owned support units were placed in the observed match, so a current-server 100% transfer loop has not yet been demonstrated. No ability was fired and no inventory/curse settings were changed during this research.
+The current client confirms the listed abilities, cooldown fields, upgrade unlocks, buff categories and passive aura. Later read-only checks observed six user-placed Erwins and an approximately 63.27-second active cooldown. MAA did not place or cast a support and did not change inventory/curse settings. A sustained current-server transfer loop has not been demonstrated by MAA.
 
-MAA 2.6 implements basic active-buff upkeep plus guarded four-unit relay and five-unit ring scheduling. The six-unit double line is not implemented. All 129 local checks pass, including 19 Buffs checks; the real six-tab UI starts without console errors. Tests use a disclosed transfer simulation and do not prove the current server formula. All Buffs controls default off. Current support-unit stats supply the displayed observed maximum; the UI does not promise team-wide coverage or a sustained 100% loop.
+MAA 2.7 implements basic active-buff upkeep, the corrected staged relay and guarded five-unit ring scheduling. The six-unit double line is not implemented. All 157 local checks pass, including 23 Buffs checks and an integrated placement/cast scenario in the Auto Play suite. The real seven-tab UI and read-only placement planner start without client warnings/errors. Tests use a disclosed transfer simulation and do not prove the current server formula. All Buffs controls default off. Current support-unit stats supply the displayed observed maximum; the UI does not promise team-wide coverage or a sustained 100% loop.

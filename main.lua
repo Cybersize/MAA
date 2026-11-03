@@ -3899,7 +3899,7 @@ end
 return __require("init")
 
 ]====]
--- MAA v2.8 -- Visual placement editor and ordered per-map action plans.
+-- MAA v2.8.1 -- Adopt existing support units in Auto buff mode.
 local Resume=...
 -- MattLib 1.2.1 is embedded, pinned and MIT licensed. No runtime downloads.
 -- Records request timestamps, not guaranteed server execution timestamps.
@@ -4602,7 +4602,7 @@ function API:Save(name)
     check(self.mode~="recording" and self.mode~="record_armed","Stop recording before saving")
     check(self.document~=nil,"There is no recording to save")
     self.document.autoRules=normalizeWaveRules(self.autoRules)
-    self.document.appVersion="2.8.0"
+    self.document.appVersion="2.8.1"
     local doc=validate(self.document)
     local path=filePath(name)
     local text=Http:JSONEncode(doc)
@@ -5887,6 +5887,24 @@ local function formation(rows,kind)
     pick(1)
     return result
 end
+local function upkeepChoice(rows,now,combo)
+    local members={}
+    for _,row in ipairs(combo and combo.order or {}) do members[row.model]=true end
+    for _,row in ipairs(rows) do
+        local isolated=not members[row.model]
+        for _,peer in ipairs(combo and combo.order or {}) do
+            if reaches(row,peer) or reaches(peer,row) then isolated=false; break end
+        end
+        if isolated and row.ready then
+            local covered=false
+            for _,peer in ipairs(rows) do
+                if now-peer.last<peer.duration and (peer.model==row.model or reaches(peer,row)) then covered=true; break end
+            end
+            if not covered then return row end
+        end
+    end
+    return nil
+end
 local function relayChoice(family,rows,now,key)
     local r=API.buffRuntime
     local p=r.plans[family]
@@ -5897,8 +5915,8 @@ local function relayChoice(family,rows,now,key)
         end
         p={kind="relay",order={rows[1],rows[2]},index=1,due=0,gap=4}; r.plans[family]=p
     end
-    if #rows>4 then r[key]="Setup required — keep exactly four units for this relay"; return nil end
-    if not p.cycled and (p.index==1 and #rows>2 or p.index==2 and #rows>3) then
+    if not p.existing and #rows>4 then r[key]="Setup required — keep exactly four units for this relay"; return nil end
+    if not p.existing and not p.cycled and (p.index==1 and #rows>2 or p.index==2 and #rows>3) then
         r[key]="Setup required — a later unit was placed before its setup cast"; return nil
     end
     local byModel,used={},{}
@@ -5925,34 +5943,85 @@ local function relayChoice(family,rows,now,key)
         if i~=j and not reaches(a,b) then r[key]="Setup required — all relay units must cover each other"; return nil end
     end end
     local top=0; for _,row in ipairs(rows) do top=math.max(top,row.power or 0) end
-    r[key]=string.format("Video 4-unit relay · step %d/4 · observed max %.0f%%",p.index,top*100)
+    local label=p.existing and "Existing 4-unit relay (warm-up)" or "Video 4-unit relay"
+    r[key]=string.format("%s · step %d/4 · observed max %.0f%%",label,p.index,top*100)
     local row=p.order[p.index]
     if not row or now<p.due then return nil end
     if not row.ready then r[key]=r[key] .. " · waiting for cooldown"; return nil end
     local a,b=p.order[1],p.order[2]
     if p.index==1 and p.cycled and hasReceivedBuff(b) then return nil end
     if p.index==2 then
-        if not hasReceivedBuff(b) then r[key]="Second unit's received buff expired — restart the setup"; return nil end
+        if not p.existing and not hasReceivedBuff(b) then r[key]="Second unit's received buff expired — restart the setup"; return nil end
         if hasReceivedBuff(a) then return nil end
     end
     if p.index==3 then
         if hasReceivedBuff(b) then return nil end
-        if not hasReceivedBuff(row) then r[key]="Third unit lost its transferred buff — restart the setup"; return nil end
+        if not p.existing and not hasReceivedBuff(row) then r[key]="Third unit lost its transferred buff — restart the setup"; return nil end
     end
     if p.index==4 then
         if hasReceivedBuff(a) then return nil end
-        if not hasReceivedBuff(row) then r[key]="Fourth unit lost its transferred buff — restart the setup"; return nil end
+        if not p.existing and not hasReceivedBuff(row) then r[key]="Fourth unit lost its transferred buff — restart the setup"; return nil end
     end
     return row,p
 end
-local function comboChoice(family,rows,now)
+local function comboChoiceInner(family,rows,now)
     local r,c=API.buffRuntime,API.autoRules.buffs
     local key=family=="erwin" and "commander" or "windsong"
     if not c[key] then r[key]="Standby"; r.plans[family]=nil; return nil end
     table.sort(rows,function(a,b) return a.serial<b.serial end)
+    if #rows==0 then r.plans[family]=nil; r[key]="No owned support units placed"; return nil end
+    if c.pattern=="Auto" and #rows==1 and API._BuffAutoStaging and API:_BuffAutoStaging(family) then
+        r[key]="Waiting for Auto Play to place the second support"; return nil
+    end
     if c.pattern~="Five-unit pentagon" then
-        local ring=c.pattern=="Auto" and formation(rows,"pentagon")
-        if not ring then return relayChoice(family,rows,now,key) end
+        local p=r.plans[family]
+        -- Preserve a confirmed relay rather than switching formations as units arrive.
+        local ring=c.pattern=="Auto" and not (p and p.kind=="relay") and formation(rows,"pentagon")
+        if not ring then
+            if c.pattern=="Auto" then
+                local byModel={}; for _,row in ipairs(rows) do byModel[row.model]=row end
+                local valid=p and p.kind=="relay"
+                for _,a in ipairs(p and p.order or {}) do
+                    if not byModel[a.model] then valid=false; break end
+                    for _,b in ipairs(p.order) do
+                        if a.model~=b.model and byModel[b.model] and not reaches(byModel[a.model],byModel[b.model]) then valid=false end
+                    end
+                end
+                if valid and #p.order==4 and #rows>4 then p.existing=true end
+                local early=p and not p.existing and not p.cycled and
+                    (p.index==1 and #rows>2 or p.index==2 and #rows>3 or #rows>4)
+                if not valid or early then
+                    local order=formation(rows,"relay")
+                    if order then
+                        local maxCooldown,duration=0,math.huge
+                        for _,row in ipairs(order) do
+                            maxCooldown=math.max(maxCooldown,row.cooldownSeconds or 60)
+                            duration=math.min(duration,row.duration)
+                        end
+                        local gap=math.max(4,maxCooldown-2*duration+1)
+                        if gap<duration then
+                            p={kind="relay",existing=true,order=order,index=1,due=0,gap=gap}
+                            r.plans[family]=p
+                        else p=nil; r.plans[family]=nil end
+                    elseif #rows==2 and reaches(rows[1],rows[2]) and reaches(rows[2],rows[1]) then
+                        p=nil; r.plans[family]=nil -- fresh staged setup, also used by Auto Play
+                    else
+                        r.plans[family]=nil; r[key]="Existing-unit upkeep · no combo formation"
+                        return upkeepChoice(rows,now)
+                    end
+                    if order and not p then
+                        r[key]="Existing-unit upkeep · cooldown too long for relay"
+                        return upkeepChoice(rows,now)
+                    end
+                end
+            end
+            local row,plan=relayChoice(family,rows,now,key)
+            if not row and c.pattern=="Auto" then
+                local current=r.plans[family]
+                if current and current.existing then return upkeepChoice(rows,now,current) end
+            end
+            return row,plan
+        end
     end
     local order=formation(rows,"pentagon")
     if not order then r[key]="Setup required — five-unit ring, each covering only its two neighbors"; r.plans[family]=nil; return nil end
@@ -5968,6 +6037,19 @@ local function comboChoice(family,rows,now)
     if now<p.due or not row.ready or p.index~=1 and not hasReceivedBuff(row) then return nil end
     return row,p
 end
+local function comboChoice(family,rows,now)
+    local row,plan=comboChoiceInner(family,rows,now)
+    local key=family=="erwin" and "commander" or "windsong"
+    if API.autoRules.buffs[key] then
+        local current=API.buffRuntime.plans[family]
+        if not row and API.autoRules.buffs.pattern=="Auto" and current and current.kind=="pentagon" then
+            row=upkeepChoice(rows,now,current)
+        end
+        local ready=0; for _,v in ipairs(rows) do if v.ready then ready=ready+1 end end
+        API.buffRuntime[key]=string.format("Detected %d owned · %d ready · %s",#rows,ready,API.buffRuntime[key])
+    end
+    return row,plan
+end
 function API:_BuffPlacementLimit(row)
     local family=row.unitId=="erwin" and "erwin" or row.unitId=="wendy" and "wendy"
     local c=self.autoRules.buffs
@@ -5975,6 +6057,7 @@ function API:_BuffPlacementLimit(row)
     if c.pattern=="Five-unit pentagon" then return 5 end
     local p=self.buffRuntime.plans[family]
     if p and p.kind=="pentagon" then return 5 end
+    if p and p.existing then return 4 end
     if not p or not p.cycled and p.index==1 then return 2 end
     if not p.cycled and p.index==2 then return 3 end
     return 4
@@ -5982,6 +6065,8 @@ end
 function API:_BuffPlacementAllowed(row,position)
     local limit=self:_BuffPlacementLimit(row)
     if not limit or limit==5 then return true end
+    local p=self.buffRuntime.plans[row.unitId]
+    if p and p.existing then return true end
     for _,peer in ipairs(buffRows()) do
         if peer.family==row.unitId then
             local candidate={position=position,radius=row.range}
@@ -6529,6 +6614,14 @@ do
                 if type(Options.AutoPlayPriorities)=="function" then return Options.AutoPlayPriorities(model) end
                 local b=services(); return b and b.unit.get_valid_priorities(model) or {}
             end}
+    end
+    function API:_BuffAutoStaging(family)
+        if not active() or not readyContext() then return false end
+        for _,row in ipairs(team()) do
+            local state=self.autoPlayRuntime.perUnit[row.uuid]
+            if row.unitId==family and row.count<2 and row.cap>=2 and not row.full and not (state and state.blocked) then return true end
+        end
+        return false
     end
     function API:GetAutoPlayInfo()
         local c=context()
@@ -7101,7 +7194,7 @@ if Options.ShowUI~=false then
     local app=MattLib.new({id="aa-macro-v2",design="Vector",wallpaperAssets=false,capabilities={},
         onError=function(message) notify("UI: " .. tostring(message)) end})
     API.uiApp=app
-    local window=app:CreateWindow({Id="macro",Title="MAA 2.8",Design="Vector",Size={800,620},
+    local window=app:CreateWindow({Id="macro",Title="MAA 2.8.1",Design="Vector",Size={800,620},
         MinSize={520,400},OpenKey="RightControl",OnClose=function() API:Shutdown() end})
     API.uiWindow=window
     local function try(fn)
@@ -7282,7 +7375,7 @@ if Options.ShowUI~=false then
     local buffSetup=buffsTab:AddSection({Title="Combo setup & status"})
     local buffPattern=buffSetup:AddDropdown({Title="Commander / Windsong pattern",Options={"Auto","Four-unit relay","Five-unit pentagon"},
         Default=API.autoRules.buffs.pattern,Callback=function(value) setBuff("pattern",value) end})
-    buffSetup:AddParagraph({Content="Auto accepts a valid five-unit ring, otherwise follows the video relay: start with two units; after cast 1 place the third; wait four seconds; after cast 2 place the fourth. Status guides each step. Auto Play can stage these four placements in mutual range. Extra or early units pause the setup. Current cooldowns and buff expiry control later casts. The video requires suitable curses; MAA does not change curses. Observed stack strength does not promise full uptime."})
+    buffSetup:AddParagraph({Content="Auto reuses already placed owned supports: a valid five-unit ring, an existing four-unit relay with warm-up, or basic upkeep for scattered units. Isolated extras receive upkeep between combo casts. Status shows detected and ready counts. Four-unit relay keeps the staged video setup: start with two, add the third after cast 1 and the fourth after cast 2. Observed strength is separate from full-team coverage or uninterrupted uptime."})
     buffSetup:AddParagraph({Content="Damage uses basic buff upkeep unless its Commander/Windsong combo is enabled. Kisuke's range and attack-SPA buffs share one cast; they unlock at upgrade 6. The active ability cooldown changes with later upgrades. Passive auras such as Idol (Star) need no active request."})
     buffSetup:AddButton({Title="Save Buffs settings in this macro JSON",Callback=function() try(function() API:SaveWaveRules(name:GetValue()) end) end})
     buffSetup:AddButton({Title="Resume buff automation",Callback=function() API:PauseWaveRules(false) end})
@@ -7782,5 +7875,5 @@ if Options.ShowUI~=false then
     end
     API.updateUI()
 end
-notify("MAA 2.8 ready: create and edit action plans from Auto Play.")
+notify("MAA 2.8.1 ready: Auto Commander and Windsong reuse placed supports.")
 return API

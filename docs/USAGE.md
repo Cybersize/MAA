@@ -1,4 +1,4 @@
-# MAA 2.8
+# MAA 2.8.1
 
 Run the same GitHub loader to receive the latest version:
 
@@ -6,7 +6,7 @@ Run the same GitHub loader to receive the latest version:
 loadstring(game:HttpGet("https://raw.githubusercontent.com/Cybersize/MAA/main/loader.lua"))()
 ```
 
-The panel should show **MAA 2.8**. MattLib 1.2.1 remains embedded. Right Ctrl hides/shows the window. Choose a design in Diagnostics.
+The panel should show **MAA 2.8.1**. MattLib 1.2.1 remains embedded. Right Ctrl hides/shows the window. Choose a design in Diagnostics.
 
 ## Match controls
 
@@ -43,9 +43,13 @@ The **Buffs** tab adds the five controls from your screenshot. All default off a
 | Auto Commander | Runs the selected formation-checked Erwin sequence instead of basic damage upkeep for that family. |
 | Auto Windsong | Runs an independent Wendy sequence with the same placement/readiness checks. |
 
-Choose **Auto**, **Four-unit relay**, or **Five-unit pentagon**. Auto accepts a valid five-unit ring or uses the staged relay. The corrected relay begins with two supports, then adds the third after cast 1 and the fourth after cast 2. Follow its status prompts. The initial wait is four seconds after the third appears; later casts follow buff expiry/readiness. Auto Play can stage those four placements in mutual range. A preplaced unseeded group of four waits for a restart instead of blindly casting. The ring rejects coverage of opposite supports, including one-way coverage caused by unequal ranges. Missing, sold, moved, or differently upgraded units trigger a new formation check. Unsupported layouts show **Setup required** and wait. The researched six-unit double-line method is not implemented.
+Choose **Auto**, **Four-unit relay**, or **Five-unit pentagon**. **Auto reuses already placed owned supports.** It prefers a valid five-unit ring, otherwise adopts four mutually covering supports for an existing-unit relay with warm-up. Extra units do not invalidate that quartet. Isolated extras receive basic upkeep between combo casts; extras that could interfere with the selected combo are excluded from casting. Without a suitable combo, Auto uses basic upkeep for the existing units. This does not implement the researched six-unit double-line combo.
 
-Combo steps use received-buff expiry, current per-unit cooldowns, global readiness, and replicated cast confirmation. Commander and Windsong track separate sequences. The ring spaces casts using the current cooldown. The relay follows the supplied tutorial; its curse requirement is not changed automatically. These schedules are experimental: the current server's complete transfer-strength formula and curse behavior have not been verified by live casts. A valid layout alone does not guarantee a sustained 100% loop.
+The status shows the number of detected owned supports and how many are ready, followed by the selected behavior. Zero detected is distinct from a formation or cooldown wait. An existing relay can take additional cycles to build strength and uses observed expiry/readiness. Auto can recover after a support is removed or a fourth support arrives early. It never sells or replaces existing units to seed a combo.
+
+**Four-unit relay** explicitly selects the tutorial's strict staged setup: begin with two supports, add the third after cast 1, wait four seconds, cast the second, then add the fourth. Auto Play preserves this sequence when starting fresh; it waits for the second support before the first cast. Follow the setup prompts in explicit relay mode. The pentagon rejects coverage of opposite supports, including one-way coverage from unequal ranges.
+
+Combo steps use received-buff expiry, current per-unit cooldowns, global readiness, and replicated cast confirmation. Commander and Windsong track separate sequences. The ring spaces casts using the current cooldown. The explicit staged relay follows the supplied tutorial; its curse requirement is not changed automatically. These schedules are experimental: the current server's complete transfer-strength formula and curse behavior have not been verified by live casts. A valid layout alone does not guarantee a sustained 100% loop.
 
 The status reports the maximum buff **observed on the support units**. It does not certify every damage unit's coverage, uninterrupted uptime, or future server acceptance. Damage-stack strength and uptime are separate measurements. Passive auras such as Idol (Star) are excluded from active requests. MAA clears the game's separate native auto-cast state for support units it manages so it cannot interrupt the sequence.
 
@@ -148,4 +152,4 @@ Map/account/place validation still applies. A recording for a different map must
 
 ## Verification
 
-The final v2.8 bundle compiles under official Luau 0.745 and passes 194 local scenarios plus Real's static checks with zero errors/warnings. The actual embedded MattLib is exercised with mocked Roblox services and a mocked viewport renderer, including pointer-based marker adding/dragging, projection math, action controls, saving, closing and reinjection cleanup. A matching Anime Adventures client was unavailable for v2.8 live checks; the connected client was in another game. Native WorldModel rendering, physical-device input and server acceptance of the new plan worker remain unverified. See [validation](VALIDATION.md).
+The v2.8.1 bundle compiles under official Luau 0.745 and passes 206 local scenarios, with zero errors or warnings from Real's core checker. Twelve new regression scenarios cover preplaced groups, six-unit selection, isolated upkeep, counts, removal/recovery, unknown outcomes, extra units joining a running combo and Auto Play coordination. Current-client read-only checks confirmed six owned ready Erwins; the failure came from the exact-two setup gate. The client disconnected before the revised controller could be tested live. Simulated warm-up does not prove the hidden server transfer formula or sustained 100% uptime. Native editor rendering and server plan playback also remain unverified. See [validation](VALIDATION.md).

@@ -2,7 +2,7 @@
 
 Roblox action macro with the bundled MattLib UI, JSON recordings, and wave-aware playback.
 
-Version 2.8 adds a visual placement editor with map markers, drag/zoom/pan, undo/redo, ordered actions and named saved plans. Path/circle Auto Play, staged support buffs, Match automation, teleport resume and Record/Play toggles remain available. Everything saves in one profile JSON. Fast Forward remains unavailable.
+Version 2.8.1 fixes Auto Commander/Windsong for already placed supports. Auto adopts a suitable existing group or uses basic upkeep, and the panel shows detected/ready counts. The visual placement editor, path/circle Auto Play, Match automation, teleport resume and Record/Play toggles remain available. Everything saves in one profile JSON.
 
 ## Run the latest version
 
@@ -60,11 +60,11 @@ All named plans share the existing JSON with recordings/settings. No editor draf
 
 Open **Buffs** for the five requested toggles and Commander/Windsong statuses. All controls default off. Basic upkeep handles supported active buffs; Kisuke's Range and attack-SPA controls share one cast. Passive auras are excluded.
 
-Choose Auto, Four-unit relay or Five-unit pentagon. The corrected relay uses staged placement, with prompts for adding supports between casts; Auto Play can handle those placements. The scheduler uses received-buff expiry, replicated cast confirmation and actual cooldown readiness. Commander/Windsong run separate sequences, override basic upkeep and suppress conflicting native auto-casts. Unsuitable layouts wait for setup. Curses are not changed automatically. The six-unit double line is not implemented.
+Choose Auto, Four-unit relay or Five-unit pentagon. Auto reuses already placed owned supports: a valid ring, four mutually covering units with warm-up, or basic upkeep. Extra units do not block the selected group; isolated extras receive upkeep between combo casts, while overlapping extras are excluded from casting. The status reports detected/ready counts. Explicit Four-unit relay keeps the tutorial's staged placement, also preserved for fresh Auto Play placements. The scheduler uses received-buff expiry, replicated cast confirmation and actual readiness. Commander/Windsong keep separate state and suppress conflicting native auto-casts. The six-unit double line is not implemented.
 
 Save Buffs settings in the same macro JSON. Stop everything pauses the automation. Status reports observed support-unit buff strength; a valid formation does not guarantee full-team coverage or a sustained 100% loop. See [the research notes](docs/BUFF_COMBO_RESEARCH.md).
 
-See [the usage guide](docs/USAGE.md) and [validation](docs/VALIDATION.md). There are 194 passing local scenarios and clean Real static checks. UI integration uses the actual MattLib with mocked services/viewport rendering. A matching target client was unavailable for native v2.8 editor checks. Live rendering/server behavior and sustained buff combos remain unverified.
+See [the usage guide](docs/USAGE.md) and [validation](docs/VALIDATION.md). There are 206 passing local scenarios and clean Real static checks. Read-only diagnosis confirmed six owned ready Erwins; Auto's setup gate caused the failure. The client disconnected before the revised controller could be tested live. Native editor rendering, server plan playback and sustained buff combos remain unverified.
 
 ## Updating
 

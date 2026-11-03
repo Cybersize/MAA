@@ -39,6 +39,12 @@ The [Lenio video](https://www.youtube.com/watch?v=XPMjMMMMkyg) was inspected thr
 
 This corrects v2.6's assumption that all four supports could be placed before setup. V2.7 rejects that unseeded layout, guides manual staging, and lets Auto Play stage the required births in mutual range. It also suppresses the game's native auto-cast table/attribute on managed supports, because the UnitUpgradeUI client loop could otherwise cast outside MAA's schedule. Unrelated Buffs controls preserve an in-progress sequence.
 
+## v2.8.1 existing-unit adoption
+
+The v2.7 staged gate was too strict for Auto: read-only build-1370 checks found six owned, ready Erwins, including a valid four-unit cluster, while the panel still asked for exactly two. Auto now reuses that cluster with a warm-up sequence. The first cycle can cast unbuffed third/fourth supports; later cycles follow observed buff expiry and real readiness. Extra supports outside the chosen group's mutual influence receive basic upkeep between its casts. Overlapping extras do not cast into the selected combo. Scattered layouts use upkeep rather than an exact-count block.
+
+Explicit Four-unit relay retains the tutorial's faster staged seed and its setup prompts. Fresh Auto Play placements retain that staging. Existing-unit warm-up reached observed 100% in local tests under the disclosed transfer model, not in a live server demonstration. The current client disconnected before revised automation could be run. This change does not implement the six-unit double-line method or establish uninterrupted full-team coverage.
+
 ## Verification boundary
 
 The current client confirms the listed abilities, cooldown fields, upgrade unlocks, buff categories and passive aura. Later read-only checks observed six user-placed Erwins and an approximately 63.27-second active cooldown. MAA did not place or cast a support and did not change inventory/curse settings. A sustained current-server transfer loop has not been demonstrated by MAA.
